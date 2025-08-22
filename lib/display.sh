@@ -4,6 +4,7 @@
 # Source dependencies
 [[ -z "$TM_MONITOR_VERSION" ]] && source "$(dirname "${BASH_SOURCE[0]}")/constants.sh"
 [[ -z "$(type -t log_message)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
+[[ -z "$(type -t format_decimal)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/formatting.sh"
 [[ -z "$(type -t get_tm_metadata)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/tmutil.sh"
 [[ -z "$(type -t CURRENT_STATE)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/state.sh"
 [[ -z "$(type -t get_terminal_width)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/terminal.sh"
@@ -128,27 +129,6 @@ _generate_row_format() {
     echo "$fmt"
 }
 
-# Pad colored text to proper width accounting for ANSI escape sequences
-pad_colored_text() {
-local text="$1"
-local width="$2"
-local align="${3:-left}"
-
-# Count visible characters (excluding ANSI escape sequences)
-local visible_text
-visible_text=$(printf "%b" "$text" | sed 's/\x1b\[[0-9;]*m//g')
-local visible_length=${#visible_text}
-
-local padding=$((width - visible_length))
-[[ $padding -lt 0 ]] && padding=0
-
-if [[ "$align" == "right" ]]; then
-printf "%*s%b" "$padding" "" "$text"
-else
-    printf "%b%*s" "$text" "$padding" ""
-fi
-}
-
 # Print table header
 print_header() {
     printf "%s\n" "$TOP_BORDER"
@@ -241,13 +221,13 @@ print_data_row() {
     # Phase column needs special handling for colored text and emoji
     # Reduce width by 1 to account for emoji taking 2 display columns
     local phase_width=$((${COLUMN_WIDTHS[1]} - 1))
-    local padded_phase="$(pad_colored_text "$colored_phase" "$phase_width" "left")"
+    local padded_phase="$(format_colored_column "$colored_phase" "$phase_width" "left")"
     printf "%s" "$padded_phase"
     
     # Rest of the columns
     # Speed column needs padding for colored text
     local speed_width="${COLUMN_WIDTHS[2]}"
-    local padded_speed="$(pad_colored_text "$colored_speed" "$speed_width" "right")"
+    local padded_speed="$(format_colored_column "$colored_speed" "$speed_width" "right")"
     printf " $BOX_VERTICAL %s " "$padded_speed"
     
     printf "$BOX_VERTICAL %9s " "$files_per_sec"
@@ -276,7 +256,7 @@ print_idle_row() {
     # Phase column needs special handling for colored text and emoji
     # Reduce width by 1 to account for emoji taking 2 display columns
     local phase_width=$((${COLUMN_WIDTHS[1]} - 1))
-    local padded_phase="$(pad_colored_text "$colored_phase" "$phase_width" "left")"
+    local padded_phase="$(format_colored_column "$colored_phase" "$phase_width" "left")"
     printf "%s" "$padded_phase"
     
     # Rest of the columns with dashes
@@ -322,4 +302,4 @@ print_backup_metadata() {
 # Export functions
 export -f init_display print_header print_footer
 export -f print_data_row print_idle_row colorize get_status_indicator
-export -f print_backup_metadata pad_colored_text
+export -f print_backup_metadata

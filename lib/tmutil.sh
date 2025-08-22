@@ -5,6 +5,7 @@
 # Source dependencies
 [[ -z "${DEFAULT_INTERVAL:-}" ]] && source "$(dirname "${BASH_SOURCE[0]}")/constants.sh"
 [[ -z "$(type -t debug)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
+[[ -z "$(type -t format_decimal)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/formatting.sh"
 
 # Cache for last tmutil status to avoid repeated calls
 TMUTIL_CACHE_TIME=0
@@ -212,20 +213,31 @@ get_tmutil_simple_status() {
         display_phase="Preparing - ${TM_NUMBER_OF_CHANGED_ITEMS} items"
     fi
     
-    # Calculate sizes in GB
-    local size_gb="0"
-    local total_gb="0"
+    # Calculate sizes in GB using centralized formatting
+    local size_gb="0.00"
+    local total_gb="0.00"
     if [[ "${TM_BYTES:-0}" -gt 0 ]]; then
-        size_gb=$(echo "scale=1; ${TM_BYTES} / 1000000000" | bc 2>/dev/null || echo "0")
+        # Extract just the number from format_bytes output (e.g., "1.23 GB" -> "1.23")
+        local formatted_size
+        formatted_size=$(format_bytes "${TM_BYTES}" "GB" 2)
+        size_gb="${formatted_size%% *}"
     fi
     if [[ "${TM_TOTAL_BYTES:-0}" -gt 0 ]]; then
-        total_gb=$(echo "scale=1; ${TM_TOTAL_BYTES} / 1000000000" | bc 2>/dev/null || echo "0")
+        local formatted_total
+        formatted_total=$(format_bytes "${TM_TOTAL_BYTES}" "GB" 2)
+        total_gb="${formatted_total%% *}"
     fi
     
-    # Calculate percentage
-    local percent_display="0"
-    if command -v bc >/dev/null 2>&1 && [[ -n "${TM_PERCENT:-}" ]]; then
-        percent_display=$(echo "scale=1; ${TM_PERCENT} * 100" | bc 2>/dev/null || echo "0")
+    # Calculate percentage with standardized formatting
+    local percent_display="0.00"
+    if [[ -n "${TM_PERCENT:-}" ]]; then
+        local percent_value
+        if command -v bc >/dev/null 2>&1; then
+            percent_value=$(echo "${TM_PERCENT} * 100" | bc 2>/dev/null || echo "0")
+        else
+            percent_value="0"
+        fi
+        percent_display=$(format_decimal "$percent_value" 2 "0.00")
     fi
     
     # Determine status - check for stopping
@@ -292,49 +304,23 @@ calculate_tm_speed() {
     local curr_bytes="${2:-0}"
     local prev_time="${3:-0}"
     local curr_time="${4:-0}"
-    local units="${5:-1000}"
+    local units="${5:-1000}"  # Not used anymore, kept for compatibility
     
     local delta_bytes=$((curr_bytes - prev_bytes))
     local delta_time=$((curr_time - prev_time))
     
     if [[ $delta_time -gt 0 ]] && [[ $delta_bytes -ge 0 ]]; then
         local bytes_per_sec=$((delta_bytes / delta_time))
-        local mb_per_sec
-        
-        if command -v bc >/dev/null 2>&1; then
-            mb_per_sec=$(echo "scale=1; $bytes_per_sec / ($units * $units)" | bc 2>/dev/null || echo "0")
-        else
-            mb_per_sec=$(( bytes_per_sec / units / units ))
-        fi
-        
-        echo "${mb_per_sec} MB/s"
+        # Use centralized formatting which respects UNITS config
+        format_speed_mbps "$bytes_per_sec"
     else
-        echo "0 MB/s"
+        echo "0.00 MB/s"
     fi
 }
 
-# Format time remaining into human-readable string
-format_time_remaining() {
-    local seconds="${1:-0}"
-    
-    if [[ "$seconds" -le 0 ]]; then
-        echo "-"
-        return
-    fi
-    
-    local hours=$((seconds / 3600))
-    local minutes=$(((seconds % 3600) / 60))
-    local secs=$((seconds % 60))
-    
-    if [[ $hours -gt 24 ]]; then
-        local days=$((hours / 24))
-        echo "${days}d ${hours%24}h"
-    elif [[ $hours -gt 0 ]]; then
-        printf "%d:%02d:%02d" "$hours" "$minutes" "$secs"
-    else
-        printf "%d:%02d" "$minutes" "$secs"
-    fi
-}
+# Format time remaining is now provided by formatting.sh
+# Keep this for backward compatibility only
+# The formatting.sh version (format_eta) is already aliased as format_time_remaining
 
 # Get enhanced status with all available info
 get_tmutil_enhanced_status() {
@@ -352,7 +338,7 @@ Stopping: $([ "$TM_STOPPING" == "1" ] && echo "Yes" || echo "No")
 Progress:
   Bytes: ${TM_BYTES} / ${TM_TOTAL_BYTES}
   Files: ${TM_FILES} / ${TM_TOTAL_FILES}
-  Percent: $(echo "scale=1; ${TM_PERCENT} * 100" | bc 2>/dev/null || echo "0")%
+  Percent: $(format_percentage "$(echo "${TM_PERCENT} * 100" | bc 2>/dev/null || echo "0")" true "0.00")
   ETA: $(format_time_remaining "$TM_TIME_REMAINING")
   
 Preparation:
@@ -408,7 +394,7 @@ get_tm_metadata() {
 export -f get_tmutil_raw get_tmutil_json parse_tmutil_status
 export -f get_tmutil_simple_status is_tm_running get_tm_phase
 export -f calculate_tm_speed get_tm_metadata get_tmutil_detailed
-export -f format_time_remaining get_tmutil_enhanced_status
+export -f get_tmutil_enhanced_status
 
 # Export global variables for use in other scripts
 export TM_RUNNING TM_PHASE TM_BYTES TM_TOTAL_BYTES TM_PERCENT

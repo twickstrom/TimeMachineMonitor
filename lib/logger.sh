@@ -5,6 +5,7 @@
 [[ -z "$(type -t get_version)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/version.sh"
 [[ -z "$(type -t determine_paths)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/paths.sh"
 [[ -z "$(type -t init_colors)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/colors.sh"
+[[ -z "$(type -t format_decimal)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/formatting.sh"
 
 # Log levels - use individual variables
 LOG_LEVEL_DEBUG=0
@@ -84,10 +85,15 @@ log_csv() {
     local bytes="$6"
     local total="$7"
 
-    # Extract numeric values only
+    # Extract and format numeric values with consistent precision
     speed="${speed%% *}"
+    speed=$(format_decimal "$speed" 2 "0.00")
+    
     files_per_sec="${files_per_sec%%/*}"
+    files_per_sec=$(format_decimal "$files_per_sec" 2 "0.00")
+    
     pct_total="${pct_total%%%*}"
+    pct_total=$(format_decimal "$pct_total" 2 "0.00")
 
     echo "$timestamp,$phase,$speed,$files_per_sec,$pct_total,$bytes,$total" >> "$CSV_LOG_FILE"
 }

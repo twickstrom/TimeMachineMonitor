@@ -3,6 +3,7 @@
 
 # Source dependencies
 [[ -z "$(type -t init_colors)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/colors.sh"
+[[ -z "$(type -t format_decimal)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/formatting.sh"
 
 # Get color based on CPU usage
 get_cpu_color() {
@@ -44,10 +45,11 @@ parse_process_info() {
     # Declare local variables
     local pid cpu mem rss time cmd color
     
+    # Parse process information with standardized formatting
     pid=$(echo "$process_line" | awk '{print $2}')
-    cpu=$(echo "$process_line" | awk '{print $3}')
-    mem=$(echo "$process_line" | awk '{print $4}')
-    rss=$(echo "$process_line" | awk '{printf "%.1f", $6/1024}')
+    cpu=$(format_decimal "$(echo "$process_line" | awk '{print $3}')" 2 "0.00")
+    mem=$(format_decimal "$(echo "$process_line" | awk '{print $4}')" 2 "0.00")
+    rss=$(format_decimal "$(echo "$process_line" | awk '{print $6/1024}')" 2 "0.00")
     time=$(echo "$process_line" | awk '{print $10}')
     
     if [[ "$process_type" == "helper" ]]; then

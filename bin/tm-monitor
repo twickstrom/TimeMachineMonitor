@@ -25,6 +25,7 @@ source "$LIB_DIR/colors.sh"        # Color definitions
 source "$LIB_DIR/python_check.sh"  # Python detection
 source "$LIB_DIR/dependencies.sh"  # Dependency checking
 source "$LIB_DIR/constants.sh"     # Constants and defaults
+source "$LIB_DIR/formatting.sh"    # Centralized formatting functions
 source "$LIB_DIR/logger.sh"        # Logging functionality
 source "$LIB_DIR/config.sh"        # Configuration loading
 source "$LIB_DIR/tmutil.sh"        # Centralized tmutil parsing

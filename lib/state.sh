@@ -4,6 +4,7 @@
 # Source dependencies
 [[ -z "${TM_MONITOR_VERSION:-}" ]] && source "$(dirname "${BASH_SOURCE[0]}")/constants.sh"
 [[ -z "$(type -t log_message)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
+[[ -z "$(type -t format_decimal)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/formatting.sh"
 
 # Session state variables
 SESSION_START_TIME=""
@@ -155,16 +156,6 @@ get_session_duration() {
     return 0
 }
 
-# Format duration for display
-format_duration() {
-    local seconds="$1"
-    local hours="$((seconds / 3600))"
-    local minutes="$(((seconds % 3600) / 60))"
-    local secs="$((seconds % 60))"
-
-    printf "%d:%02d:%02d" "$hours" "$minutes" "$secs"
-}
-
 # Check if backup is running
 is_backup_running() {
     [[ "$CURRENT_PHASE" != "BackupNotRunning" ]] && \
@@ -199,18 +190,15 @@ get_session_summary() {
     local avg_speed
     avg_speed="$(get_average_speed)"
 
+    # Use centralized formatting for speed
     local avg_speed_mb
-    if command -v bc >/dev/null 2>&1; then
-        avg_speed_mb="$(echo "scale=2; $avg_speed / $UNITS / $UNITS" | bc -l 2>/dev/null || echo "0")"
-    else
-        avg_speed_mb="$((avg_speed / UNITS / UNITS))"
-    fi
+    avg_speed_mb="$(format_speed_mbps "$avg_speed")"
 
     cat <<SUMMARY
 Session Summary:
   Duration: $(format_duration "$duration")
   Samples: $SESSION_SAMPLE_COUNT
-  Average Speed: ${avg_speed_mb} MB/s
+  Average Speed: ${avg_speed_mb}
   Speed Samples: ${#SPEED_SAMPLES[@]}
   Failures: $SESSION_FAILURE_COUNT
 
@@ -283,4 +271,4 @@ except Exception as e:
 
 # Export functions
 export -f init_session update_state get_average_speed get_session_duration
-export -f format_duration is_backup_running cache_dynamic_values get_session_summary
+export -f is_backup_running cache_dynamic_values get_session_summary

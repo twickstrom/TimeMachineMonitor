@@ -5,7 +5,82 @@ All notable changes to TimeMachineMonitor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] - 2025-01-01
+## [0.9.1] - 2025-08-22
+
+### Added
+- Centralized formatting module (`lib/formatting.sh`) for consistent output
+- Standardized all numeric formatting to 2 decimal places
+- Unified null value representation (using "-" for uncalculable values)
+- Backward compatibility aliases for existing format functions
+- Support for both decimal (1000) and binary (1024) units based on UNITS config
+- Comprehensive formatting functions:
+  - `format_decimal()` - Generic decimal formatting with precision
+  - `format_percentage()` - Percentage formatting with 0-100 clamping
+  - `format_bytes()` - Flexible size formatting with auto-scaling
+  - `format_size_ratio()` - Consistent "X / Y GB" formatting
+  - `format_duration()` - Multiple time format options
+  - `format_eta()` - ETA formatting with long duration handling
+  - `format_speed_mbps()` - Speed formatting respecting UNITS config
+  - `format_column()` - Fixed-width column formatting with alignment
+  - `format_colored_column()` - ANSI color-aware column formatting
+
+### Changed
+- Consolidated duplicate formatting functions across codebase
+- Standardized decimal precision to always use 2 places
+- Unified time formatting patterns across bash and Python components
+- Improved column padding with centralized functions
+- Enhanced null value handling consistency
+
+### Fixed
+- Inconsistent decimal places in numeric displays
+- Mixed null value representations ("0" vs "0.00" vs "-")
+- Duplicate `format_duration()` implementations
+- Varying scale values in bc calculations
+- Column alignment issues with colored text
+
+### Technical Debt Reduced
+- Eliminated ~60 lines of duplicate formatting code
+- Created single source of truth for all formatting operations
+- Improved maintainability with centralized formatting logic
+- Enhanced testability with isolated formatting functions
+
+### Implementation Progress
+- ✅ Step 1: Updated `bin/tm-monitor`
+  - Added source for `lib/formatting.sh`
+  - Updated `lib/state.sh` to use `format_speed_mbps()` for average speed
+  - Removed duplicate `format_duration()` function from `lib/state.sh`
+  - Cleaned up exports to avoid duplication
+- ✅ Step 2: Updated `bin/tm-monitor-resources`
+  - Added source for `lib/formatting.sh`
+  - Removed duplicate `format_decimal()` function
+  - Updated all decimal formatting to use centralized `format_decimal()`
+  - Replaced inline speed calculation with `format_speed_mbps()`
+  - Standardized all numeric displays to 2 decimal places
+- ✅ Step 3: Updated `lib/display.sh`
+  - Added source for `lib/formatting.sh`
+  - Removed duplicate `pad_colored_text()` function
+  - Updated all calls to use `format_colored_column()`
+  - Cleaned up exports to avoid duplication
+  - Consolidated column padding logic
+- ✅ Step 4: Updated `lib/tmutil.sh`
+  - Added source for `lib/formatting.sh`
+  - Replaced size calculations with `format_bytes()` (2 decimal places)
+  - Updated percentage formatting to use `format_decimal()`
+  - Replaced `calculate_tm_speed()` to use `format_speed_mbps()`
+  - Removed duplicate `format_time_remaining()` (uses format_eta from formatting.sh)
+  - Standardized all numeric outputs to 2 decimal places
+- ✅ Step 5: Updated `lib/resource_helpers.sh`
+  - Added source for `lib/formatting.sh`
+  - Updated process parsing to use `format_decimal()` for CPU%, MEM%, RSS
+  - Standardized RSS formatting to 2 decimal places
+  - Ensured consistent formatting across all numeric outputs
+- ✅ Step 6: Updated `lib/logger.sh`
+  - Added source for `lib/formatting.sh`
+  - Updated CSV logging to use `format_decimal()` for all numeric values
+  - Ensured consistent 2 decimal place precision in CSV output
+  - Standardized numeric extraction and formatting
+
+## [0.9.0] - 2025-08-20
 
 ### Added
 - Professional installer with multiple installation modes (user/system/dev)
@@ -69,7 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Implemented safe path handling throughout
 - Added process isolation for helper daemon
 
-## [0.8.0] - 2024-12-15
+## [0.8.0] - 2025-08-05
 
 ### Added
 - Initial public release
@@ -79,7 +154,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session statistics and summaries
 - Basic configuration file support
 
-## [0.1.0] - 2024-12-01
+## [0.1.0] - 2025-08-01
 
 ### Added
 - Initial development version
