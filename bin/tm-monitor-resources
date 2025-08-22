@@ -1,0 +1,580 @@
+#!/usr/bin/env bash
+# tm-monitor-resources - Monitor resource usage of tm-monitor processes
+
+set -uo pipefail
+export LC_ALL=en_US.UTF-8
+
+# Initialize paths using centralized path management
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Temporary bootstrap to find paths.sh
+if [[ -d "$SCRIPT_DIR/../lib" ]]; then
+    source "$SCRIPT_DIR/../lib/paths.sh"
+else
+    source "${LIB_DIR:-$HOME/.local/lib/tm-monitor}/paths.sh"
+fi
+
+# Initialize all paths
+determine_paths "${BASH_SOURCE[0]}"
+LIB_DIR="$TM_LIB_DIR"
+
+# Source libraries (in dependency order)
+source "$LIB_DIR/version.sh"       # Version management
+source "$LIB_DIR/colors.sh"        # Color definitions
+source "$LIB_DIR/terminal.sh"      # Terminal management
+source "$LIB_DIR/python_check.sh"  # Python detection
+source "$LIB_DIR/constants.sh"     # Constants and defaults
+source "$LIB_DIR/logger.sh"        # Logging functionality
+source "$LIB_DIR/config.sh"        # Configuration loading
+source "$LIB_DIR/state.sh"         # State management
+source "$LIB_DIR/tmutil.sh"        # Centralized tmutil parsing
+source "$LIB_DIR/resource_helpers.sh"  # Resource monitoring helpers
+
+# Resource monitor specific variables
+WATCH_MODE=false
+INTERVAL=2
+USE_COLORS=true
+
+# For tracking TM status changes
+LAST_TM_BYTES=""
+LAST_TM_TIME=""
+
+# Column width constants - Total width must equal 72
+readonly COL_PID=6       # PID column
+readonly COL_CPU=8       # CPU% column  
+readonly COL_MEM=8       # MEM% column
+readonly COL_RSS=8       # RSS(MB) column
+readonly COL_TIME=10     # TIME column
+readonly COL_CMD=22      # COMMAND column
+# Format: PID(6) + SP(1) + CPU%(8) + SP(1) + MEM%(8) + SP(1) + RSS(MB)(8) + SP(5) + TIME(10) + SP(2) + COMMAND(22) = 72 chars
+
+# Minimum terminal size
+readonly MIN_COLS=72
+readonly MIN_ROWS=40
+
+# Show usage
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [options]
+
+Monitor CPU/memory usage of tm-monitor processes and Time Machine status.
+
+Options:
+  -w, --watch          Continuous monitoring (updates every 2 seconds)
+  -i, --interval <sec> Update interval for watch mode (default: 2)
+  -c, --no-colors      Disable colored output
+  -h, --help           Show this help message
+  -v, --version        Show version
+
+Examples:
+  $(basename "$0")              # Show current status once
+  $(basename "$0") --watch      # Continuous monitoring
+  $(basename "$0") -w -i 5      # Update every 5 seconds
+
+Displayed Information:
+  • Process Resources
+    - PID, CPU%, MEM%, RSS (MB), TIME, COMMAND
+    - Total resource usage and system impact assessment
+  
+  • Time Machine Status
+    - Current backup status (Running/Idle/Not Running)
+    - Backup phase and progress percentage
+    - Data copied vs total data size
+  
+  • Session Statistics
+    - Monitoring session duration
+    - Number of samples collected
+    - Average backup speed (calculated from TM data)
+    - Failure count
+
+Note on Metrics:
+  - CPU%: Percentage of CPU used by the process
+  - MEM%: Percentage of total system memory used
+  - RSS: Resident Set Size - actual physical memory used (in MB)
+
+EOF
+    exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -w|--watch)
+            WATCH_MODE=true
+            shift
+            ;;
+        -i|--interval)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: Missing value for $1" >&2
+                exit 1
+            fi
+            INTERVAL="$2"
+            shift 2
+            ;;
+        -c|--no-colors)
+            USE_COLORS=false
+            SHOW_COLORS=false  # For compatibility with other modules
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -v|--version)
+            echo "tm-monitor-resources version $(get_version)"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Validate interval
+if ! [[ "$INTERVAL" =~ ^[0-9]+$ ]] || (( INTERVAL < 1 || INTERVAL > 60 )); then
+    echo "Error: Interval must be 1-60 seconds (got: $INTERVAL)" >&2
+    exit 1
+fi
+
+# Get Time Machine status with speed calculation
+get_tm_status_for_display() {
+    # Use centralized tmutil parsing (returns pipe-separated values)
+    local status_data
+    status_data=$(get_tmutil_simple_status 2>/dev/null)
+    
+    if [[ -z "$status_data" ]]; then
+        ((SESSION_FAILURE_COUNT++))
+        echo "Not Running|-|-|-|-"
+        return 1
+    fi
+    
+    # Parse tmutil status to update global variables
+    parse_tmutil_status >/dev/null 2>&1
+    
+    # Track speed using centralized calculation
+    if [[ -n "${TM_BYTES:-}" ]] && [[ "$TM_BYTES" -gt 0 ]]; then
+        local current_time speed_str speed_val
+        current_time=$(date +%s)
+        if [[ -n "$LAST_TM_BYTES" ]] && [[ -n "$LAST_TM_TIME" ]]; then
+            speed_str=$(calculate_tm_speed "$LAST_TM_BYTES" "$TM_BYTES" "$LAST_TM_TIME" "$current_time" "1000")
+            speed_val="${speed_str%% *}"
+            if [[ "$speed_val" != "0" ]]; then
+                # Convert MB/s to bytes/sec for state.sh compatibility
+                CURRENT_BYTES_PER_SEC=$(echo "$speed_val * 1000000" | bc -l 2>/dev/null | cut -d. -f1)
+                if [[ -n "$CURRENT_BYTES_PER_SEC" ]] && [[ "$CURRENT_BYTES_PER_SEC" -gt 0 ]]; then
+                    SPEED_SAMPLES+=("$CURRENT_BYTES_PER_SEC")
+                    # Keep only recent samples
+                    if (( ${#SPEED_SAMPLES[@]} > MAX_SPEED_SAMPLES )); then
+                        SPEED_SAMPLES=("${SPEED_SAMPLES[@]:1}")
+                    fi
+                fi
+            fi
+        fi
+        LAST_TM_BYTES="$TM_BYTES"
+        LAST_TM_TIME="$current_time"
+    fi
+    
+    # Return the already formatted data from get_tmutil_simple_status
+    echo "$status_data"
+    return 0
+}
+
+# Format a process row
+format_process_row() {
+    local pid="$1"
+    local cpu="$2"
+    local mem="$3"
+    local rss="$4"
+    local time="$5"
+    local cmd="$6"
+    local use_colors="${7:-true}"
+    
+    local color
+    color=$(get_cpu_color "$cpu" "$use_colors")
+    
+    # Format the row to fit exactly 72 chars
+    # PID(6) + SP(1) + CPU%(8) + SP(1) + MEM%(8) + SP(1) + RSS(MB)(8) + SP(5) + TIME(10) + SP(2) + COMMAND(22) = 72
+    printf "\033[K${color}%-6s %8.2f %8.2f %8.2f     %-10s  %-22.22s${COLOR_RESET}\n" \
+           "${pid:0:6}" "$cpu" "$mem" "$rss" "${time:0:10}" "${cmd:0:22}"
+}
+
+# Parse process info from ps output line
+parse_process_line() {
+    local line="$1"
+    local is_helper="${2:-false}"
+    
+    local pid cpu mem rss time cmd
+    pid=$(echo "$line" | awk '{print $2}')
+    cpu=$(echo "$line" | awk '{printf "%.2f", $3}')
+    mem=$(echo "$line" | awk '{printf "%.2f", $4}')
+    rss=$(echo "$line" | awk '{printf "%.2f", $6/1024}')
+    time=$(echo "$line" | awk '{print $10}')
+    
+    if [[ "$is_helper" == "true" ]]; then
+        cmd="tm-monitor-helper"
+    else
+        cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/.*//' | cut -c1-22)
+    fi
+    
+    echo "$pid|$cpu|$mem|$rss|$time|$cmd"
+}
+
+# Get load average color based on core count
+get_load_color() {
+    local load="$1"
+    local num_cores="$2"
+    
+    if (( $(echo "$load < $num_cores" | bc -l 2>/dev/null || echo 1) )); then
+        echo "$COLOR_GREEN"
+    elif (( $(echo "$load < $((num_cores * 2))" | bc -l 2>/dev/null || echo 0) )); then
+        echo "$COLOR_BOLD_YELLOW"
+    else
+        echo "$COLOR_RED"
+    fi
+}
+
+# Format a value with 2 decimal places, with fallback
+format_decimal() {
+    local value="$1"
+    local default="${2:-0.00}"
+    
+    if [[ -n "$value" ]] && [[ "$value" != "-" ]]; then
+        printf "%.2f" "$value" 2>/dev/null || echo "$default"
+    else
+        echo "$default"
+    fi
+}
+
+# Function to get resource data
+get_resources() {
+    # Move to home position (we're in alternate buffer)
+    cursor_home
+    
+    # Check terminal size using centralized function
+    if ! check_terminal_minimum $MIN_ROWS $MIN_COLS; then
+        print_terminal_warning $MIN_ROWS $MIN_COLS
+        return 1
+    fi
+    
+    # Use a divider that's exactly 72 characters
+    local LINE_WIDTH=72
+    local DIVIDER
+    DIVIDER=$(printf '%.0s-' {1..72})
+    
+    # Clear line and print header (main title in BOLD BLUE)
+    clear_line
+    printf "${COLOR_BOLD_BLUE}TM-Monitor Resource Usage - $(date '+%Y-%m-%d %H:%M:%S')${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
+    
+    # Find processes
+    local monitor_procs helper_procs
+    monitor_procs=$(ps aux | grep -E "[b]ash.*tm-monitor|tm-monitor$" | grep -v "tm-monitor-resources")
+    helper_procs=$(ps aux | grep -E "[p]ython.*tm-monitor-helper")
+    
+    if [[ -z "$monitor_procs" ]] && [[ -z "$helper_procs" ]]; then
+        # No processes found - show message and clear the rest of the screen
+        clear_line
+        printf "\n"
+        clear_line
+        printf "  ${COLOR_BOLD_YELLOW}⚠ No tm-monitor processes found${COLOR_RESET}\n"
+        clear_line
+        printf "\n"
+        clear_line
+        printf "  Start tm-monitor first, then run this command to see resource usage.\n"
+        clear_line
+        printf "\n"
+        clear_line
+        printf "  Example: tm-monitor\n"
+        
+        # Clear remaining lines
+        local i
+        for i in {1..10}; do
+            clear_line
+            printf "\n"
+        done
+        
+        return 0
+    fi
+    
+    # Header with fixed width formatting to fit exactly 72 chars
+    clear_line
+    printf "%-6s %8s %8s %8s     %-10s  %-22s\n" \
+           "PID" "CPU%" "MEM%" "RSS(MB)" "TIME" "COMMAND"
+    clear_line
+    echo "${DIVIDER}"
+    
+    local total_cpu=0
+    local total_mem=0
+    local total_rss=0
+    local process_count=0
+    
+    # Process monitor processes
+    if [[ -n "$monitor_procs" ]]; then
+        while IFS= read -r line; do
+            # Parse process info
+            local pid cpu mem rss time cmd
+            pid=$(echo "$line" | awk '{print $2}')
+            cpu=$(echo "$line" | awk '{printf "%.2f", $3}')
+            mem=$(echo "$line" | awk '{printf "%.2f", $4}')
+            rss=$(echo "$line" | awk '{printf "%.2f", $6/1024}')
+            time=$(echo "$line" | awk '{print $10}')
+            cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/.*\///' | cut -c1-22)
+            
+            # Format and print the row
+            format_process_row "$pid" "$cpu" "$mem" "$rss" "$time" "$cmd" "$USE_COLORS"
+            
+            # Accumulate totals
+            total_cpu=$(echo "$total_cpu + $cpu" | bc -l 2>/dev/null || echo "$total_cpu")
+            total_mem=$(echo "$total_mem + $mem" | bc -l 2>/dev/null || echo "$total_mem")
+            total_rss=$(echo "$total_rss + $rss" | bc -l 2>/dev/null || echo "$total_rss")
+            ((process_count++))
+        done <<< "$monitor_procs"
+    fi
+    
+    # Process helper processes
+    if [[ -n "$helper_procs" ]]; then
+        while IFS= read -r line; do
+            # Parse process info
+            local pid cpu mem rss time
+            pid=$(echo "$line" | awk '{print $2}')
+            cpu=$(echo "$line" | awk '{printf "%.2f", $3}')
+            mem=$(echo "$line" | awk '{printf "%.2f", $4}')
+            rss=$(echo "$line" | awk '{printf "%.2f", $6/1024}')
+            time=$(echo "$line" | awk '{print $10}')
+            
+            # Format and print the row
+            format_process_row "$pid" "$cpu" "$mem" "$rss" "$time" "tm-monitor-helper" "$USE_COLORS"
+            
+            # Accumulate totals
+            total_cpu=$(echo "$total_cpu + $cpu" | bc -l 2>/dev/null || echo "$total_cpu")
+            total_mem=$(echo "$total_mem + $mem" | bc -l 2>/dev/null || echo "$total_mem")
+            total_rss=$(echo "$total_rss + $rss" | bc -l 2>/dev/null || echo "$total_rss")
+            ((process_count++))
+        done <<< "$helper_procs"
+    fi
+    
+    clear_line
+    echo "${DIVIDER}"
+    
+    # Format and display totals to fit exactly 72 chars (only first 4 columns)
+    total_cpu=$(printf "%.2f" "$total_cpu" 2>/dev/null || echo "0.00")
+    total_mem=$(printf "%.2f" "$total_mem" 2>/dev/null || echo "0.00")
+    total_rss=$(printf "%.2f" "$total_rss" 2>/dev/null || echo "0.00")
+    
+    clear_line
+    printf "%-6s %8.2f %8.2f %8.2f\n" "TOTAL" "${total_cpu}" "${total_mem}" "${total_rss}"
+    
+    # Show impact assessment
+    local num_cores total_mem_gb
+    num_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    total_mem_gb=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.2f", $1/1024/1024/1024}')
+    
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}Impact Assessment${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
+    
+    # Get CPU impact level
+    local cpu_impact cpu_level cpu_color
+    cpu_impact=$(get_impact_level "$total_cpu" "2" "5")
+    IFS='|' read -r cpu_level cpu_color <<< "$cpu_impact"
+    clear_line
+    printf "%-20s: ${cpu_color}%-8s${COLOR_RESET} (%.2f%% of %d cores)\n" "CPU Usage" "$cpu_level" "$total_cpu" "$num_cores"
+    
+    # Get Memory percentage impact level
+    local mem_pct_impact mem_pct_level mem_pct_color
+    mem_pct_impact=$(get_impact_level "$total_mem" "0.1" "1.0")
+    IFS='|' read -r mem_pct_level mem_pct_color <<< "$mem_pct_impact"
+    clear_line
+    printf "%-20s: ${mem_pct_color}%-8s${COLOR_RESET} (%.2f%% of system RAM)\n" "Memory Percentage" "$mem_pct_level" "$total_mem"
+    
+    # Get Memory RSS impact level
+    local mem_rss_impact mem_rss_level mem_rss_color
+    mem_rss_impact=$(get_impact_level "$total_rss" "50" "200")
+    IFS='|' read -r mem_rss_level mem_rss_color <<< "$mem_rss_impact"
+    clear_line
+    printf "%-20s: ${mem_rss_color}%-8s${COLOR_RESET} (%.2f MB of %.2f GB)\n" "Memory Size (RSS)" "$mem_rss_level" "$total_rss" "$total_mem_gb"
+    
+    # System Load with explanation
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}System Load${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
+    
+    # Parse load averages
+    local load1 load5 load15
+    load1=$(uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $1}' | tr -d ',')
+    load5=$(uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $2}' | tr -d ',')
+    load15=$(uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $3}' | tr -d ',')
+    
+    # Determine color for each load average based on core count
+    local load1_color load5_color load15_color
+    load1_color=$(get_load_color "$load1" "$num_cores")
+    load5_color=$(get_load_color "$load5" "$num_cores")
+    load15_color=$(get_load_color "$load15" "$num_cores")
+    
+    # Format load averages with time indicators and colors
+    clear_line
+    printf "%-20s: ${load1_color}%.2f${COLOR_RESET} 1m   ${load5_color}%.2f${COLOR_RESET} 5m   ${load15_color}%.2f${COLOR_RESET} 15m\n" "Load Averages" "$load1" "$load5" "$load15"
+    
+    # Determine overall status based on 1-minute average
+    local load_status load_color
+    if (( $(echo "$load1 < $num_cores" | bc -l 2>/dev/null || echo 1) )); then
+        load_status="Normal"
+        load_color="$COLOR_GREEN"
+    elif (( $(echo "$load1 < $((num_cores * 2))" | bc -l 2>/dev/null || echo 0) )); then
+        load_status="Elevated"
+        load_color="$COLOR_BOLD_YELLOW"
+    else
+        load_status="High"
+        load_color="$COLOR_RED"
+    fi
+    
+    clear_line
+    printf "%-20s: ${load_color}%s${COLOR_RESET} (%.2f / %d cores)\n" "Status" "$load_status" "$load1" "$num_cores"
+    
+    # Time Machine Status section
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}Time Machine Status${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
+    
+    local tm_status status phase percent size_gb total_gb
+    tm_status=$(get_tm_status_for_display)
+    IFS='|' read -r status phase percent size_gb total_gb <<< "$tm_status"
+    
+    clear_line
+    printf "%-20s: " "Status"
+    case "$status" in
+        Running)
+            printf "${COLOR_GREEN}%s${COLOR_RESET}\n" "$status"
+            ;;
+        Stopping)
+            printf "${COLOR_RED}%s${COLOR_RESET}\n" "$status"
+            ;;
+        "Not Running")
+            printf "${COLOR_BOLD_YELLOW}%s${COLOR_RESET}\n" "$status"
+            ;;
+        *)
+            printf "${COLOR_CYAN}%s${COLOR_RESET}\n" "$status"
+            ;;
+    esac
+    
+    if [[ "$status" == "Running" ]] || [[ "$status" == "Stopping" ]]; then
+        # Format all numeric values with 2 decimals using DRY function
+        local formatted_percent formatted_size formatted_total
+        formatted_percent=$(format_decimal "$percent")
+        formatted_size=$(format_decimal "$size_gb")
+        formatted_total=$(format_decimal "$total_gb")
+        
+        clear_line
+        printf "%-20s: %s\n" "Phase" "$phase"
+        clear_line
+        printf "%-20s: %s%%\n" "Progress" "$formatted_percent"
+        clear_line
+        printf "%-20s: %s GB (current batch)\n" "Data Copied" "$formatted_size"
+        clear_line
+        printf "%-20s: %s GB (sparsebundle)\n" "Estimated Size" "$formatted_total"
+        
+        # Add ETA if available
+        if [[ "${TM_TIME_REMAINING:-0}" -gt 0 ]]; then
+            local eta_formatted
+            eta_formatted=$(format_time_remaining "$TM_TIME_REMAINING")
+            clear_line
+            printf "%-20s: %s\n" "ETA" "$eta_formatted"
+        fi
+        
+        # Show number of changed items if in preparation phase
+        if [[ "${TM_PHASE:-}" == "Starting" ]] && [[ "${TM_NUMBER_OF_CHANGED_ITEMS:-0}" -gt 0 ]]; then
+            clear_line
+            printf "%-20s: %s\n" "Items Found" "$TM_NUMBER_OF_CHANGED_ITEMS"
+        fi
+    else
+        clear_line
+        printf "%-20s: %s\n" "Phase" "-"
+        clear_line
+        printf "%-20s: %s\n" "Progress" "-"
+        clear_line
+        printf "%-20s: %s\n" "Data Copied" "-"
+        clear_line
+        printf "%-20s: %s\n" "Estimated Size" "-"
+    fi
+    
+    # Session Statistics section (using functions from state.sh)
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}Session Statistics${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
+    
+    # Update session stats
+    ((SESSION_SAMPLE_COUNT++))
+    
+    # Get average speed in MB/s with 2 decimal places
+    local avg_speed_bytes avg_speed_mb
+    avg_speed_bytes=$(get_average_speed)
+    if [[ "$avg_speed_bytes" -gt 0 ]]; then
+        avg_speed_mb=$(echo "scale=2; $avg_speed_bytes / 1000000" | bc 2>/dev/null || echo "0.00")
+    else
+        avg_speed_mb="0.00"
+    fi
+    
+    clear_line
+    printf "%-20s: %s\n" "Duration" "$(format_duration $(get_session_duration))"
+    clear_line
+    printf "%-20s: %d\n" "Samples" "$SESSION_SAMPLE_COUNT"
+    clear_line
+    printf "%-20s: %s MB/s\n" "Average Speed" "$avg_speed_mb"
+    clear_line
+    printf "%-20s: %d\n" "Speed Samples" "${#SPEED_SAMPLES[@]}"
+    clear_line
+    printf "%-20s: %d\n" "Failures" "$SESSION_FAILURE_COUNT"
+    
+    # Clear any remaining lines from previous display
+    clear_line
+    printf "\n"
+    clear_line
+    printf "Press Ctrl+C to exit (updating every ${INTERVAL}s)\n"
+}
+
+# Handle interrupt signal gracefully
+handle_interrupt() {
+    cleanup_terminal_monitoring
+    echo
+    echo "Monitoring stopped."
+    echo
+    # Show brief summary using state.sh function
+    get_session_summary
+    exit 0
+}
+
+# Main execution
+if [[ "$WATCH_MODE" == "true" ]]; then
+    # Continuous monitoring using centralized terminal functions
+    setup_terminal_monitoring
+    
+    # Initialize session tracking (from state.sh)
+    init_session
+    
+    # Set up proper cleanup on exit
+    trap 'handle_interrupt' INT TERM
+    trap 'cleanup_terminal_monitoring' EXIT
+    
+    while true; do
+        get_resources
+        sleep "$INTERVAL"
+    done
+else
+    # Single run
+    init_session
+    get_resources
+fi

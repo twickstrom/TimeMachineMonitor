@@ -1,0 +1,23 @@
+# TM-Monitor Configuration File
+# Copy this file to ~/.config/tm-monitor/config.conf and modify as needed
+
+# Update interval in seconds (1-300)
+INTERVAL=2
+
+# Size units: 1000 for GB (SI), 1024 for GiB (IEC)
+UNITS=1000
+
+# Enable colored output (true/false)
+SHOW_COLORS=true
+
+# Show session summary on exit (true/false)
+SHOW_SUMMARY=true
+
+# Enable debug logging (true/false)
+DEBUG=false
+
+# Enable CSV logging for data analysis (true/false)
+CSV_LOG=false
+
+# Maximum consecutive tmutil failures before giving up (1-10)
+MAX_FAILURES=3

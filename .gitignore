@@ -1,0 +1,116 @@
+# Internal development files
+.internal/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Logs
+*.log
+logs/
+data/logs/
+
+# Runtime
+*.pid
+*.lock
+run/
+data/run/
+
+# Cache
+cache/
+*.cache
+.cache/
+
+# Config (user-specific, but keep examples)
+config.conf
+!config.conf.example
+!tm-monitor.conf.example
+
+# CSV exports
+*.csv
+data/*.csv
+
+# Temp files
+*.tmp
+*.bak
+*.swp
+*~
+.*.sw?
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+*.code-workspace
+.project
+.pydevproject
+
+# Testing
+test_output/
+coverage/
+.coverage
+.pytest_cache/
+.tox/
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+
+# Package managers
+node_modules/
+.npm/
+
+# Backup files
+*.orig
+*.rej
+
+# Named pipes (created at runtime)
+*.pipe
+helper.in
+helper.out
+
+# User data directories (if running from source)
+data/
+!data/.gitkeep
+
+# Installation artifacts
+/installed_files.txt
+/install.log
+
+# Debug/test scripts (keep in repo but don't track changes)
+debug_*.sh
+!debug_tmutil.sh
+test_*.sh
+!test_components.sh
