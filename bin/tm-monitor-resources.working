@@ -28,11 +28,8 @@ source "$LIB_DIR/formatting.sh"    # Centralized formatting functions
 source "$LIB_DIR/logger.sh"        # Logging functionality
 source "$LIB_DIR/config.sh"        # Configuration loading
 source "$LIB_DIR/state.sh"         # State management
-source "$LIB_DIR/display.sh"       # Display and UI functions
 source "$LIB_DIR/tmutil.sh"        # Centralized tmutil parsing
 source "$LIB_DIR/resource_helpers.sh"  # Resource monitoring helpers
-source "$LIB_DIR/system_info.sh"   # System information functions
-source "$LIB_DIR/process_management.sh" # Process management functions
 
 # Resource monitor specific variables
 WATCH_MODE=false
@@ -184,38 +181,79 @@ get_tm_status_for_display() {
     return 0
 }
 
-# Helper function to display placeholder fields
-print_placeholder_fields() {
-    local fields=("Phase" "Progress" "Data Copied" "Estimated Size")
-    local values=("-" "-" "-" "-")
+# Format a process row
+format_process_row() {
+    local pid="$1"
+    local cpu="$2"
+    local mem="$3"
+    local rss="$4"
+    local time="$5"
+    local cmd="$6"
+    local use_colors="${7:-true}"
     
-    for i in "${!fields[@]}"; do
-        clear_line
-        printf "%-20s: %s\n" "${fields[$i]}" "${values[$i]}"
-    done
+    local color
+    color=$(get_cpu_color "$cpu" "$use_colors")
+    
+    # Handle special case for placeholder rows (when process not running)
+    if [[ "$pid" == "-" ]]; then
+        # Show dashes for inactive processes (dimmed if colors enabled)
+        if [[ "$use_colors" == "true" ]]; then
+            printf "\033[K${COLOR_DIM}%-6s%8s %8s %8s    %-10s %-29.29s${COLOR_RESET}\n" \
+                   "-" "-" "-" "-" "-" "${cmd:0:29}"
+        else
+            printf "\033[K%-6s%8s %8s %8s    %-10s %-29.29s\n" \
+                   "-" "-" "-" "-" "-" "${cmd:0:29}"
+        fi
+    else
+        # Normal process row with values
+        # Format: PID(6) + CPU%(8) + SP(1) + MEM%(8) + SP(1) + RSS(8) + SP(4) + TIME(10) + SP(1) + CMD(29) = 76
+        printf "\033[K${color}%-6s%8.2f %8.2f %8.2f    %-10s %-29.29s${COLOR_RESET}\n" \
+               "${pid:0:6}" "$cpu" "$mem" "$rss" "${time:0:10}" "${cmd:0:29}"
+    fi
 }
 
-# Helper function to print colored status
-print_colored_status() {
-    local status="$1"
-    local color
+# Parse process info from ps output line
+parse_process_line() {
+    local line="$1"
+    local is_helper="${2:-false}"
     
-    case "$status" in
-        Running)
-            color="$COLOR_GREEN"
-            ;;
-        Stopping)
-            color="$COLOR_RED"
-            ;;
-        "Not Running")
-            color="$COLOR_BOLD_YELLOW"
-            ;;
-        *)
-            color="$COLOR_CYAN"
-            ;;
-    esac
+    local pid cpu mem rss time cmd
+    pid=$(echo "$line" | awk '{print $2}')
+    cpu=$(echo "$line" | awk '{printf "%.2f", $3}')
+    mem=$(echo "$line" | awk '{printf "%.2f", $4}')
+    rss=$(echo "$line" | awk '{printf "%.2f", $6/1024}')
     
-    printf "${color}%s${COLOR_RESET}\n" "$status"
+    # Get raw time and format it consistently
+    time=$(echo "$line" | awk '{print $10}')
+    # Format TIME to ensure consistent width: HH:MM.SS or MM:SS.SS
+    # Examples: "0:04.67" -> "00:04.67", "7:04.85" -> "07:04.85", "60:47.19" -> "60:47.19"
+    if [[ "$time" =~ ^[0-9]:.*$ ]]; then
+        # Single digit hour/minute, add leading zero
+        time="0${time}"
+    fi
+    # Ensure consistent width (pad to 8-10 chars for display)
+    
+    if [[ "$is_helper" == "true" ]]; then
+        cmd="tm-monitor-helper"
+    else
+        cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/.*\///' | cut -c1-29)
+    fi
+    
+    echo "$pid|$cpu|$mem|$rss|$time|$cmd"
+}
+
+# Get load average color based on core count
+get_load_color() {
+    local load="$1"
+    local num_cores="$2"
+    
+    if (( $(echo "$load < $num_cores" | bc -l 2>/dev/null || echo 1) )); then
+        echo "$COLOR_GREEN"
+    elif (( $(echo "$load < $((num_cores * 2))" | bc -l 2>/dev/null || echo 0) )); then
+        echo "$COLOR_BOLD_YELLOW"
+    else
+        echo "$COLOR_RED"
+    fi
 }
 
 # Function to get resource data
@@ -229,39 +267,39 @@ get_resources() {
         return 1
     fi
     
-    # Use centralized terminal function for divider
+    # Use a divider that's exactly 76 characters
     local LINE_WIDTH=76
     local DIVIDER
-    DIVIDER=$(draw_horizontal_line "-" 76)
+    DIVIDER=$(printf '%.0s-' {1..76})
     
-    # Clear and print header using centralized functions
+    # Clear line and print header (main title in BOLD BLUE)
     clear_line
-    printf "${COLOR_BOLD_BLUE}%s${COLOR_RESET}\n" "TM-Monitor Resource Usage - $(format_timestamp "" "%Y-%m-%d %H:%M:%S")"
+    printf "${COLOR_BOLD_BLUE}TM-Monitor Resource Usage - $(date '+%Y-%m-%d %H:%M:%S')${COLOR_RESET}\n"
     clear_line
     echo "${DIVIDER}"
     
-    # Find processes using centralized functions
+    # Find processes
     local monitor_procs helper_procs backupd_procs backupd_helper_procs
-    monitor_procs=$(find_tm_monitor_processes)
-    helper_procs=$(find_tm_monitor_helper_processes)
-    backupd_procs=$(find_backupd_processes)
-    backupd_helper_procs=$(find_backupd_helper_processes)
+    monitor_procs=$(ps aux | grep -E "[b]ash.*tm-monitor|tm-monitor$" | grep -v "tm-monitor-resources")
+    helper_procs=$(ps aux | grep -E "[p]ython.*tm-monitor-helper")
+    backupd_procs=$(ps aux | grep -E "[b]ackupd$" | grep -v "backupd-helper")
+    backupd_helper_procs=$(ps aux | grep -E "[b]ackupd-helper")
     
-    # Check if any processes are found using centralized functions
+    # Check if any processes are found (tm-monitor or Time Machine)
     local has_tm_monitor=false
     local has_time_machine=false
     
-    if is_any_tm_monitor_running; then
+    if [[ -n "$monitor_procs" ]] || [[ -n "$helper_procs" ]]; then
         has_tm_monitor=true
     fi
-    if is_any_time_machine_running; then
+    if [[ -n "$backupd_procs" ]] || [[ -n "$backupd_helper_procs" ]]; then
         has_time_machine=true
     fi
     
     # We no longer exit early - always show the process table with placeholders
     # This allows monitoring to continue even when tm-monitor is killed
     
-    # Header using centralized column formatting
+    # Header with fixed width formatting to fit exactly 76 chars
     clear_line
     printf "%-6s%8s %8s %8s    %-10s %-29s\n" \
            "PID" "CPU%" "MEM%" "RSS(MB)" "TIME" "COMMAND"
@@ -273,59 +311,112 @@ get_resources() {
     local total_rss=0
     local process_count=0
     
-    # Process all types of processes using centralized functions
-    display_processes_or_placeholder "$monitor_procs" "tm-monitor" "false" "$USE_COLORS"
-    display_processes_or_placeholder "$helper_procs" "tm-monitor-helper" "true" "$USE_COLORS"
-    display_processes_or_placeholder "$backupd_procs" "Time Machine (backupd)" "true" "$USE_COLORS"
-    display_processes_or_placeholder "$backupd_helper_procs" "Time Machine (backupd-helper)" "true" "$USE_COLORS"
+    # Helper function to process and display processes (DRY)
+    process_and_display() {
+        local process_list="$1"
+        local process_name="$2"
+        local is_fixed_name="${3:-false}"  # true for helper processes with fixed names
+        
+        if [[ -n "$process_list" ]]; then
+            while IFS= read -r line; do
+                # Parse process info using the DRY function
+                local parsed_info
+                parsed_info=$(parse_process_line "$line" "false")
+                
+                # Extract parsed values
+                local pid cpu mem rss time cmd
+                IFS='|' read -r pid cpu mem rss time cmd <<< "$parsed_info"
+                
+                # Override command name if fixed
+                if [[ "$is_fixed_name" == "true" ]]; then
+                    cmd="$process_name"
+                else
+                    # For tm-monitor processes, use parsed cmd
+                    if [[ -n "$process_name" ]] && [[ "$process_name" != "monitor" ]]; then
+                        cmd="$process_name"
+                    fi
+                fi
+                
+                # Format and print the row
+                format_process_row "$pid" "$cpu" "$mem" "$rss" "$time" "$cmd" "$USE_COLORS"
+                
+                # Accumulate totals
+                total_cpu=$(echo "$total_cpu + $cpu" | bc -l 2>/dev/null || echo "$total_cpu")
+                total_mem=$(echo "$total_mem + $mem" | bc -l 2>/dev/null || echo "$total_mem")
+                total_rss=$(echo "$total_rss + $rss" | bc -l 2>/dev/null || echo "$total_rss")
+                ((process_count++))
+            done <<< "$process_list"
+        fi
+    }
     
-    # Calculate totals for all processes
-    local all_procs
-    all_procs=$({
-        [[ -n "$monitor_procs" ]] && echo "$monitor_procs"
-        [[ -n "$helper_procs" ]] && echo "$helper_procs"
-        [[ -n "$backupd_procs" ]] && echo "$backupd_procs"
-        [[ -n "$backupd_helper_procs" ]] && echo "$backupd_helper_procs"
-    })
+    # Process all types of processes using the DRY function
+    # Always show tm-monitor rows (with dashes if not running)
+    if [[ -n "$monitor_procs" ]]; then
+        process_and_display "$monitor_procs" "tm-monitor" "false"
+    else
+        # Show placeholder row for tm-monitor
+        format_process_row "-" "0.00" "0.00" "0.00" "-" "tm-monitor" "$USE_COLORS"
+    fi
     
-    if [[ -n "$all_procs" ]]; then
-        local totals
-        totals=$(get_process_totals "$all_procs")
-        IFS='|' read -r total_cpu total_mem total_rss process_count <<< "$totals"
+    if [[ -n "$helper_procs" ]]; then
+        process_and_display "$helper_procs" "tm-monitor-helper" "true"
+    else
+        # Show placeholder row for tm-monitor-helper
+        format_process_row "-" "0.00" "0.00" "0.00" "-" "tm-monitor-helper" "$USE_COLORS"
+    fi
+    
+    # Always show Time Machine rows (with dashes if not running)
+    if [[ -n "$backupd_procs" ]]; then
+        process_and_display "$backupd_procs" "Time Machine (backupd)" "true"
+    else
+        # Show placeholder row for Time Machine
+        format_process_row "-" "0.00" "0.00" "0.00" "-" "Time Machine (backupd)" "$USE_COLORS"
+    fi
+    
+    if [[ -n "$backupd_helper_procs" ]]; then
+        process_and_display "$backupd_helper_procs" "Time Machine (backupd-helper)" "true"
+    else
+        # Show placeholder row for Time Machine helper
+        format_process_row "-" "0.00" "0.00" "0.00" "-" "Time Machine (backupd-helper)" "$USE_COLORS"
     fi
     
     clear_line
     echo "${DIVIDER}"
     
-    # Format totals using centralized formatting - already using format_decimal
+    # Format and display totals to fit exactly 76 chars (only first 4 columns)
+    # Note: RSS totals may include shared memory counted multiple times
     total_cpu=$(format_decimal "$total_cpu" 2 "0.00")
     total_mem=$(format_decimal "$total_mem" 2 "0.00")
     total_rss=$(format_decimal "$total_rss" 2 "0.00")
     
     clear_line
-    printf "%-6s%8s %8s %8s\n" "TOTAL" "${total_cpu}" "${total_mem}" "${total_rss}"
+    printf "%-6s%8.2f %8.2f %8.2f\n" "TOTAL" "${total_cpu}" "${total_mem}" "${total_rss}"
     
-    # Show impact assessment using centralized system info functions
+    # Show impact assessment
     local num_cores total_mem_gb
-    num_cores=$(get_cpu_cores)
-    total_mem_gb=$(get_total_memory_gb)
+    num_cores=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    total_mem_gb=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.2f", $1/1024/1024/1024}')
     
-    # Show impact assessment using section header
-    print_section_header "Impact Assessment"
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}Impact Assessment${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
     
     # Get CPU impact level
     local cpu_impact cpu_level cpu_color
     cpu_impact=$(get_impact_level "$total_cpu" "2" "5")
     IFS='|' read -r cpu_level cpu_color <<< "$cpu_impact"
     clear_line
-    printf "%-20s: ${cpu_color}%-8s${COLOR_RESET} %s%% of %d cores\n" "CPU Usage" "$cpu_level" "$(format_percentage "$total_cpu" false "0.00")" "$num_cores"
+    printf "%-20s: ${cpu_color}%-8s${COLOR_RESET} %.2f%% of %d cores\n" "CPU Usage" "$cpu_level" "$total_cpu" "$num_cores"
     
     # Get Memory percentage impact level (adjusted thresholds for more realistic values)
     local mem_pct_impact mem_pct_level mem_pct_color
     mem_pct_impact=$(get_impact_level "$total_mem" "1.0" "5.0")
     IFS='|' read -r mem_pct_level mem_pct_color <<< "$mem_pct_impact"
     clear_line
-    printf "%-20s: ${mem_pct_color}%-8s${COLOR_RESET} %s%% of system RAM\n" "Memory Percentage" "$mem_pct_level" "$(format_percentage "$total_mem" false "0.00")"
+    printf "%-20s: ${mem_pct_color}%-8s${COLOR_RESET} %.2f%% of system RAM\n" "Memory Percentage" "$mem_pct_level" "$total_mem"
     
     # Get Memory RSS impact level - use dynamic thresholds based on system memory
     # For a 32GB system: Low < 320MB (1%), Moderate 320-1600MB (1-5%), High > 1600MB (5%)
@@ -341,23 +432,31 @@ get_resources() {
     mem_rss_impact=$(get_impact_level "$total_rss" "$rss_low_threshold" "$rss_high_threshold")
     IFS='|' read -r mem_rss_level mem_rss_color <<< "$mem_rss_impact"
     clear_line
-    # Calculate RSS percentage using centralized formatting
+    # Calculate RSS percentage with better precision
     local total_mem_mb_float=$(echo "$total_mem_gb * 1024" | bc -l 2>/dev/null)
     local rss_pct
     if [[ -n "$total_mem_mb_float" ]] && [[ "$total_mem_mb_float" != "0" ]]; then
         rss_pct=$(echo "scale=3; $total_rss / $total_mem_mb_float * 100" | bc -l 2>/dev/null)
-        rss_pct=$(format_percentage "$rss_pct" false "0.00")
+        # Format to 2 decimal places for display
+        rss_pct=$(printf "%.2f" "$rss_pct" 2>/dev/null || echo "0.00")
     else
         rss_pct="0.00"
     fi
-    printf "%-20s: ${mem_rss_color}%-8s${COLOR_RESET} %s MB (%s%% of %.1f GB)\n" "Memory Size (RSS)" "$mem_rss_level" "$total_rss" "$rss_pct" "$total_mem_gb"
+    printf "%-20s: ${mem_rss_color}%-8s${COLOR_RESET} %.2f MB (%.2f%% of %.1f GB)\n" "Memory Size (RSS)" "$mem_rss_level" "$total_rss" "$rss_pct" "$total_mem_gb"
     
-    # System Load section
-    print_section_header "System Load"
+    # System Load with explanation
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}System Load${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
     
-    # Parse load averages using centralized function
+    # Parse load averages
     local load1 load5 load15
-    IFS='|' read -r load1 load5 load15 <<< "$(get_load_averages)"
+    load1=$(uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $1}' | tr -d ',')
+    load5=$(uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $2}' | tr -d ',')
+    load15=$(uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $3}' | tr -d ',')
     
     # Determine color for each load average based on core count
     local load1_color load5_color load15_color
@@ -365,38 +464,33 @@ get_resources() {
     load5_color=$(get_load_color "$load5" "$num_cores")
     load15_color=$(get_load_color "$load15" "$num_cores")
     
-    # Format load averages with centralized formatting
-    local formatted_load1 formatted_load5 formatted_load15
-    formatted_load1=$(format_decimal "$load1" 2 "0.00")
-    formatted_load5=$(format_decimal "$load5" 2 "0.00")
-    formatted_load15=$(format_decimal "$load15" 2 "0.00")
-    
+    # Format load averages with time indicators and colors
     clear_line
-    printf "%-20s: ${load1_color}%s${COLOR_RESET} 1m   ${load5_color}%s${COLOR_RESET} 5m   ${load15_color}%s${COLOR_RESET} 15m\n" "Load Averages" "$formatted_load1" "$formatted_load5" "$formatted_load15"
+    printf "%-20s: ${load1_color}%.2f${COLOR_RESET} 1m   ${load5_color}%.2f${COLOR_RESET} 5m   ${load15_color}%.2f${COLOR_RESET} 15m\n" "Load Averages" "$load1" "$load5" "$load15"
     
-    # Determine overall status based on 1-minute average using centralized function
+    # Determine overall status based on 1-minute average
     local load_status load_color
-    load_status=$(get_load_status)
-    case "$load_status" in
-        Normal)
-            load_color="$COLOR_GREEN"
-            ;;
-        Elevated)
-            load_color="$COLOR_BOLD_YELLOW"
-            ;;
-        High)
-            load_color="$COLOR_RED"
-            ;;
-        *)
-            load_color="$COLOR_RESET"
-            ;;
-    esac
+    if (( $(echo "$load1 < $num_cores" | bc -l 2>/dev/null || echo 1) )); then
+        load_status="Normal"
+        load_color="$COLOR_GREEN"
+    elif (( $(echo "$load1 < $((num_cores * 2))" | bc -l 2>/dev/null || echo 0) )); then
+        load_status="Elevated"
+        load_color="$COLOR_BOLD_YELLOW"
+    else
+        load_status="High"
+        load_color="$COLOR_RED"
+    fi
     
     clear_line
-    printf "%-20s: ${load_color}%s${COLOR_RESET} (%s / %d cores)\n" "Status" "$load_status" "$(format_decimal "$load1" 2 "0.00")" "$num_cores"
+    printf "%-20s: ${load_color}%s${COLOR_RESET} (%.2f / %d cores)\n" "Status" "$load_status" "$load1" "$num_cores"
     
     # Time Machine Status section
-    print_section_header "Time Machine Status"
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}Time Machine Status${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
     
     local tm_status status phase percent size_gb total_gb
     tm_status=$(get_tm_status_for_display)
@@ -404,28 +498,41 @@ get_resources() {
     
     clear_line
     printf "%-20s: " "Status"
-    print_colored_status "$status"
+    case "$status" in
+        Running)
+            printf "${COLOR_GREEN}%s${COLOR_RESET}\n" "$status"
+            ;;
+        Stopping)
+            printf "${COLOR_RED}%s${COLOR_RESET}\n" "$status"
+            ;;
+        "Not Running")
+            printf "${COLOR_BOLD_YELLOW}%s${COLOR_RESET}\n" "$status"
+            ;;
+        *)
+            printf "${COLOR_CYAN}%s${COLOR_RESET}\n" "$status"
+            ;;
+    esac
     
     if [[ "$status" == "Running" ]] || [[ "$status" == "Stopping" ]]; then
-        # Use centralized formatting functions
+        # Format all numeric values with 2 decimals using DRY function
         local formatted_percent formatted_size formatted_total
-        formatted_percent=$(format_percentage "$percent" true "0.00")
-        formatted_size=$(format_decimal "$size_gb" 2 "0.00")
-        formatted_total=$(format_decimal "$total_gb" 2 "0.00")
+        formatted_percent=$(format_decimal "$percent")
+        formatted_size=$(format_decimal "$size_gb")
+        formatted_total=$(format_decimal "$total_gb")
         
         clear_line
         printf "%-20s: %s\n" "Phase" "$phase"
         clear_line
-        printf "%-20s: %s\n" "Progress" "$formatted_percent"
+        printf "%-20s: %s%%\n" "Progress" "$formatted_percent"
         clear_line
         printf "%-20s: %s GB (current batch)\n" "Data Copied" "$formatted_size"
         clear_line
         printf "%-20s: %s GB (sparsebundle)\n" "Estimated Size" "$formatted_total"
         
-        # Add ETA if available using centralized formatting
+        # Add ETA if available
         if [[ "${TM_TIME_REMAINING:-0}" -gt 0 ]]; then
             local eta_formatted
-            eta_formatted=$(format_eta "$TM_TIME_REMAINING")
+            eta_formatted=$(format_time_remaining "$TM_TIME_REMAINING")
             clear_line
             printf "%-20s: %s\n" "ETA" "$eta_formatted"
         fi
@@ -436,31 +543,42 @@ get_resources() {
             printf "%-20s: %s\n" "Items Found" "$TM_NUMBER_OF_CHANGED_ITEMS"
         fi
     else
-        print_placeholder_fields
+        clear_line
+        printf "%-20s: %s\n" "Phase" "-"
+        clear_line
+        printf "%-20s: %s\n" "Progress" "-"
+        clear_line
+        printf "%-20s: %s\n" "Data Copied" "-"
+        clear_line
+        printf "%-20s: %s\n" "Estimated Size" "-"
     fi
     
-    # Session Statistics section
-    print_section_header "Session Statistics"
+    # Session Statistics section (using functions from state.sh)
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}Session Statistics${COLOR_RESET}\n"
+    clear_line
+    echo "${DIVIDER}"
     
     # Update session stats
     ((SESSION_SAMPLE_COUNT++))
     
-    # Get average speed using centralized formatting
-    local avg_speed_bytes avg_speed_mb_formatted session_duration
+    # Get average speed in MB/s with centralized formatting
+    local avg_speed_bytes avg_speed_mb_formatted
     avg_speed_bytes=$(get_average_speed)
     avg_speed_mb_formatted=$(format_speed_mbps "$avg_speed_bytes")
-    session_duration=$(get_session_duration)
     
     clear_line
-    printf "%-20s: %s\n" "Duration" "$(format_duration "$session_duration" "AUTO")"
+    printf "%-20s: %s\n" "Duration" "$(format_duration $(get_session_duration))"
     clear_line
-    printf "%-20s: %s\n" "Samples" "$(format_integer "$SESSION_SAMPLE_COUNT" false "0")"
+    printf "%-20s: %d\n" "Samples" "$SESSION_SAMPLE_COUNT"
     clear_line
     printf "%-20s: %s\n" "Average Speed" "$avg_speed_mb_formatted"
     clear_line
-    printf "%-20s: %s\n" "Speed Samples" "$(format_integer "${#SPEED_SAMPLES[@]}" false "0")"
+    printf "%-20s: %d\n" "Speed Samples" "${#SPEED_SAMPLES[@]}"
     clear_line
-    printf "%-20s: %s\n" "Failures" "$(format_integer "$SESSION_FAILURE_COUNT" false "0")"
+    printf "%-20s: %d\n" "Failures" "$SESSION_FAILURE_COUNT"
     
     # Clear any remaining lines from previous display
     clear_line
@@ -469,18 +587,13 @@ get_resources() {
     printf "Press Ctrl+C to exit (updating every ${INTERVAL}s)\n"
 }
 
-# Handle interrupt signal gracefully using centralized functions
+# Handle interrupt signal gracefully
 handle_interrupt() {
-    # Use centralized terminal cleanup
     cleanup_terminal_monitoring
-    
-    # Clear line and show status
-    clear_line
     echo
     echo "Monitoring stopped."
     echo
-    
-    # Show summary using state.sh function
+    # Show brief summary using state.sh function
     get_session_summary
     exit 0
 }
@@ -490,20 +603,19 @@ if [[ "$WATCH_MODE" == "true" ]]; then
     # Continuous monitoring using centralized terminal functions
     setup_terminal_monitoring
     
-    # Initialize session tracking from state.sh
+    # Initialize session tracking (from state.sh)
     init_session
     
     # Set up proper cleanup on exit
     trap 'handle_interrupt' INT TERM
     trap 'cleanup_terminal_monitoring' EXIT
     
-    # Main monitoring loop
     while true; do
         get_resources
         sleep "$INTERVAL"
     done
 else
-    # Single run mode
+    # Single run
     init_session
     get_resources
 fi

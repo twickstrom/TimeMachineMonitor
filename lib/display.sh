@@ -299,7 +299,29 @@ print_backup_metadata() {
     fi
 }
 
+# Print a section header with consistent formatting
+# Usage: print_section_header <title> [divider_char]
+print_section_header() {
+    local title="$1"
+    local divider_char="${2:--}"
+    local divider
+    
+    # Use centralized terminal function for divider if available
+    if [[ "$(type -t draw_horizontal_line)" == "function" ]]; then
+        divider=$(draw_horizontal_line "$divider_char" 76)
+    else
+        divider=$(printf '%.0s%s' {1..76} | sed "s/./$divider_char/g")
+    fi
+    
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_CYAN}%s${COLOR_RESET}\n" "$title"
+    clear_line
+    echo "${divider}"
+}
+
 # Export functions
 export -f init_display print_header print_footer
 export -f print_data_row print_idle_row colorize get_status_indicator
-export -f print_backup_metadata
+export -f print_backup_metadata print_section_header

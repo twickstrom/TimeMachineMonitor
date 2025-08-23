@@ -36,38 +36,22 @@ get_impact_level() {
     fi
 }
 
-# Parse and display process information
-parse_process_info() {
-    local process_line="$1"
-    local process_type="$2"  # "monitor" or "helper"
-    local use_colors="${3:-true}"
+# Get load average color based on core count
+# This calculates appropriate thresholds based on number of CPU cores:
+# - Green: load < cores (system is underutilized)
+# - Yellow: cores <= load < cores*2 (system is busy but not overloaded)
+# - Red: load >= cores*2 (system is overloaded)
+get_load_color() {
+    local load="$1"
+    local num_cores="$2"
     
-    # Declare local variables
-    local pid cpu mem rss time cmd color
+    # Use centralized impact level function with core-based thresholds
+    local impact_result
+    impact_result=$(get_impact_level "$load" "$num_cores" "$((num_cores * 2))")
     
-    # Parse process information with standardized formatting
-    pid=$(echo "$process_line" | awk '{print $2}')
-    cpu=$(format_decimal "$(echo "$process_line" | awk '{print $3}')" 2 "0.00")
-    mem=$(format_decimal "$(echo "$process_line" | awk '{print $4}')" 2 "0.00")
-    rss=$(format_decimal "$(echo "$process_line" | awk '{print $6/1024}')" 2 "0.00")
-    time=$(echo "$process_line" | awk '{print $10}')
-    
-    if [[ "$process_type" == "helper" ]]; then
-        cmd="python: tm-monitor-helper"
-    else
-        cmd=$(echo "$process_line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/.*\///' | cut -c1-30)
-    fi
-    
-    # Get color based on CPU usage
-    color=$(get_cpu_color "$cpu" "$use_colors")
-    
-    # Print formatted line
-    printf "\033[K${color}%-8s %6s %6s %8s %10s  %-30s${COLOR_RESET}\n" \
-           "$pid" "$cpu" "$mem" "$rss" "$time" "$cmd"
-    
-    # Return values for accumulation (using echo with pipe separator)
-    echo "${cpu}|${mem}|${rss}"
+    # Extract just the color from the result (part after the pipe)
+    echo "${impact_result#*|}"
 }
 
 # Export functions
-export -f get_cpu_color get_impact_level parse_process_info
+export -f get_cpu_color get_impact_level get_load_color

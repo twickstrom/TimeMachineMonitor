@@ -5,6 +5,66 @@ All notable changes to TimeMachineMonitor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2025-08-23
+
+### Added
+- **New Library Modules**:
+  - `lib/system_info.sh` - Comprehensive system information retrieval (CPU, memory, load, disk, network)
+  - `lib/process_management.sh` - Process finding, parsing, and management functions
+- **Time Machine Process Monitoring** - Resource monitor now tracks Apple's native `backupd` and `backupd-helper` processes
+- **Placeholder Rows** - All processes (tm-monitor, tm-monitor-helper, Time Machine) show dimmed dashes when not running, preventing display jumping
+- **Always-On Monitoring** - Resource monitor continues running even when all processes are inactive
+- **Dynamic Memory Thresholds** - RSS memory thresholds now scale with system RAM (1% for Low, 5% for High)
+- **COLOR_DIM Support** - Added dim text effect for inactive/placeholder process rows
+- **Terminal Management Module** (`lib/terminal.sh`) - Centralized terminal operations with cursor control and screen management
+- **Display Helper Functions**:
+  - `print_section_header()` - Consistent section headers with dividers
+  - `display_processes_or_placeholder()` - DRY process display logic
+  - `print_colored_status()` - Status color selection helper
+  - `print_placeholder_fields()` - Placeholder dash display helper
+
+### Changed
+- **Major DRY Refactoring**:
+  - Moved `parse_process_line()` and `format_process_row()` to `lib/process_management.sh`
+  - Moved `get_load_color()` to `lib/resource_helpers.sh` with proper documentation
+  - Replaced all direct `sysctl` calls with library functions
+  - Replaced all `ps aux | grep` patterns with centralized process finding functions
+  - Eliminated ~250 lines of duplicate code across the project
+- **Display Width Optimized** - Reduced from 80 to 76 columns for side-by-side display on 16" MacBook Pro
+- **Memory Thresholds Reworked** - Now dynamic based on total system RAM with minimum safeguards
+- **Impact Assessment Format** - Cleaner display without extra parentheses/colons
+- **No Early Exit** - Resource monitor no longer exits when no processes found
+- **Consolidated Python Detection** - Removed duplicate `python_utils.sh`, using only `python_check.sh`
+- **Process Finding** - Now using centralized functions: `find_tm_monitor_processes()`, `find_backupd_processes()`, etc.
+- **System Info Retrieval** - Now using `get_cpu_cores()`, `get_total_memory_gb()`, `get_load_averages()`, `get_load_status()`
+- **Section Headers** - All section headers now use centralized `print_section_header()` function
+
+### Fixed
+- **RSS Percentage Calculation** - Fixed precision issue showing 0.00% instead of actual percentage
+- **Display Jumping** - Process table now maintains stable 4-row layout
+- **Terminal Size Detection** - Now properly detects size even in alternate buffer mode
+- **Memory Impact Thresholds** - 206 MB out of 32 GB now correctly shows as "Low" not "High"
+- **Process Name Truncation** - "Time Machine (backupd-helper)" now fits completely (28 chars)
+- **DRY Violations** - Eliminated all duplicate code through comprehensive refactoring
+- **Double Exit Message** - Reduced duplicate "Press Ctrl+C" display issues
+- **Unused Code** - Removed dead `parse_process_info()` function that was never called
+
+### Technical Improvements
+- **Code Reduction** - Removed ~250 lines through DRY refactoring and library centralization
+- **Better Separation of Concerns** - Functions moved to appropriate libraries based on functionality
+- **Enhanced Process Detection** - More robust grep patterns for finding processes
+- **Improved Precision** - RSS percentage calculation uses scale=3 for better accuracy
+- **Consistent Formatting** - All process info parsing uses centralized functions
+- **Modular Architecture** - Clear separation between orchestration (scripts) and implementation (libraries)
+- **Single Source of Truth** - Each function now exists in exactly one place
+- **Reusable Components** - All library functions available for use by other scripts
+
+### Library Functions Added
+- **System Info**: `get_cpu_cores()`, `get_total_memory_gb()`, `get_load_averages()`, `get_load_status()`, `get_uptime_seconds()`, `get_disk_usage()`, and more
+- **Process Management**: `find_tm_monitor_processes()`, `parse_process_line()`, `format_process_row()`, `display_placeholder_row()`, `get_process_totals()`, `display_processes_or_placeholder()`
+- **Resource Helpers**: `get_load_color()` with proper core-based threshold logic
+- **Display Helpers**: `print_section_header()` for consistent section formatting
+
 ## [0.9.1] - 2025-08-22
 
 ### Added

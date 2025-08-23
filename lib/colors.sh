@@ -36,6 +36,11 @@ init_colors() {
         export COLOR_WHITE='\033[0;37m'
         export COLOR_RESET='\033[0m'
         
+        # Special effects
+        export COLOR_DIM='\033[2m'
+        export COLOR_BOLD='\033[1m'
+        export COLOR_UNDERLINE='\033[4m'
+        
         # Bold variants
         export COLOR_BOLD_BLACK='\033[1;30m'
         export COLOR_BOLD_RED='\033[1;31m'
@@ -61,6 +66,11 @@ init_colors() {
         export COLOR_CYAN=''
         export COLOR_WHITE=''
         export COLOR_RESET=''
+        
+        # Special effects
+        export COLOR_DIM=''
+        export COLOR_BOLD=''
+        export COLOR_UNDERLINE=''
         
         # Bold variants
         export COLOR_BOLD_BLACK=''

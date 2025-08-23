@@ -1,42 +1,98 @@
 # TM-Monitor
 
-A powerful, real-time Time Machine backup monitor for macOS with advanced analytics and resource tracking.
+A powerful, real-time Apple Time Machine backup monitor for macOS Sonoma+ with advanced analytics and resource tracking.
 
-![Version](https://img.shields.io/badge/version-0.9.0-blue)
-![macOS](https://img.shields.io/badge/macOS-14.0%2B-green)
+![Version](https://img.shields.io/badge/version-0.9.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-purple)
+![Platform](https://img.shields.io/badge/platform-Apple%20Silicon%20%7C%20Intel-lightgrey)
+![Size](https://img.shields.io/github/repo-size/twickstrom/TimeMachineMonitor)
+![macOS](https://img.shields.io/badge/macOS-15.0%2B-green)
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Bash](https://img.shields.io/badge/bash-3.2%2B-green)
 
-## ✨ Features
+## 🤔 Why TM-Monitor?
 
-- 📊 **Real-time Progress Monitoring** - Live updates of backup progress, speed, and ETA
-- 🎯 **Detailed Analytics** - Track files/sec, MB/s, batch vs total progress  
-- 📈 **Resource Monitoring** - Monitor CPU and memory usage of backup processes
-- 🔄 **Speed Smoothing** - 30-second rolling average for accurate speed calculations
-- 🎨 **Beautiful Display** - Color-coded phases, progress bars, and clean formatting
-- 📝 **CSV Logging** - Export backup data for analysis
-- ⚡ **Efficient Architecture** - Python helper daemon for complex calculations
-- 🔍 **Auto-detection** - Automatically finds the best Python 3 interpreter
-- 🛡️ **Secure** - No eval usage, safe configuration parsing
-- 🚀 **Easy Installation** - Professional installer with multiple modes
+Apple's Time Machine is great, but it lacks visibility. **You're left wondering:**
+- 🐌 Why is my backup taking so long?
+- 📊 How fast is data actually transferring?
+- 🔮 When will the backup finish?
+- 💾 How much data is left to copy?
+- 🔥 Is Time Machine using too much CPU?
+
+**TM-Monitor answers all these questions in real-time**, giving you the insights Apple didn't build into macOS.
 
 ## 📸 Screenshots
 
-```
-┌──────────┬──────────────────────────────────┬──────────────┬───────────┬
-│ Time     │ Phase                            │ Speed        │ Files/s   │
-├──────────┼──────────────────────────────────┼──────────────┼───────────┤
-│ 14:23:45 │ 🟢 Copying                       │ 45.2 MB/s    │ 1,234/s   │
-└──────────┴──────────────────────────────────┴──────────────┴───────────┘
-```
+<img src="docs/images/tm-monitor.png" width="100%" alt="TM-Monitor Main Display">
 
-## 🔧 Requirements
+<img src="docs/images/tm-monitor-resource-usage.png" width="100%" alt="TM-Monitor Resource Usage">
 
-- **macOS 14.0 (Sonoma) or later** - Required for latest Time Machine features
-- **Time Machine configured** - Must have Time Machine enabled
-- **No additional dependencies** - Everything needed is included with macOS:
-  - Python 3 (automatically detected)
-  - Bash 3.2+ (included with macOS)
-  - Standard macOS utilities (tmutil, plutil)
+<img src="docs/images/tm-side-by-side.png" width="100%" alt="TM-Monitor Side by Side View">
+
+## 🎯 What Makes TM-Monitor Special?
+
+- **Native Apple Integration** - Uses Apple's own `tmutil` for accurate data
+- **📈 Advanced Analytics** - 30-second smoothed averages, not jumpy instant values
+- **🔋 Low Overhead** - Efficient Python daemon, minimal CPU usage (<1%)
+- **🎨 Beautiful TUI** - Color-coded phases, progress bars, emoji indicators
+- **📊 Data Export** - CSV logging for historical analysis
+- **🔒 Security First** - No eval, no sudo required, safe parsing
+- **🚀 Zero Dependencies** - Everything needed is already in macOS
+
+## ✨ Features
+
+### Real-Time Monitoring
+- 📊 Live backup progress with percentage complete
+- ⚡ Current transfer speed in MB/s or MiB/s
+- 📁 Files per second transfer rate
+- ⏱️ Accurate ETA with smart calculations
+- 🔄 Automatic refresh every 2 seconds
+
+### Advanced Analytics  
+- 📈 30-second rolling average for smooth readings
+- 🎯 Batch vs. total progress tracking
+- 📝 CSV export for historical analysis
+- 🔢 Precise 2-decimal formatting throughout
+
+### Resource Management
+- 💻 CPU usage monitoring for all TM processes
+- 🧠 Memory (RAM) tracking with RSS metrics
+- ⚖️ System load impact assessment
+- 🚦 Color-coded performance indicators
+
+### Professional Tools
+- ⚙️ Configuration file support
+- 🎨 Customizable display options
+- 🐛 Debug logging for troubleshooting
+- 📦 Multiple installation modes
+
+## 📊 TM-Monitor vs. Vanilla Time Machine
+
+| Feature | Time Machine | TM-Monitor |
+|---------|---------------|------------|
+| Progress Bar | ✅ Basic | ✅ Detailed with % |
+| Speed Display | ❌ | ✅ MB/s with smoothing |
+| ETA | ❌ | ✅ Smart calculations |
+| Files/sec | ❌ | ✅ Real-time |
+| CPU Usage | ❌ | ✅ All TM processes |
+| Memory Usage | ❌ | ✅ RSS tracking |
+| Phase Details | ✅ Limited | ✅ Full phase info |
+| CSV Export | ❌ | ✅ For analysis |
+| Batch Progress | ❌ | ✅ Current vs Total |
+
+## 🖥️ System Requirements
+
+### Supported Systems
+- **macOS**: 14.0 Sonoma or later (for latest Time Machine features)
+- **Hardware**: Apple Silicon (M1/M2/M3) or Intel Macs
+- **Time Machine**: Must be configured and enabled
+
+### Built with macOS Native Tools
+No additional downloads needed! TM-Monitor uses only what Apple provides:
+- `tmutil` - Apple's Time Machine utility
+- `plutil` - Apple's property list utility  
+- Python 3 - Included with macOS
+- Bash - macOS default shell
 
 ## 📦 Installation
 
@@ -266,6 +322,23 @@ tm-monitor/
 └── Makefile                    # Make targets
 ```
 
+## 🔧 Troubleshooting
+
+### Common Issues
+
+**"Time Machine not found" error**
+- Ensure Time Machine is configured in System Settings → General → Time Machine
+
+**Numbers showing as "-"**
+- This is normal when Time Machine is idle or between backup phases
+
+**Python not found**
+- Run `./install.sh --check-only` to diagnose
+- The installer will find the best Python version automatically
+
+**Permission denied**
+- Make sure scripts are executable: `chmod +x bin/*`
+
 ## 🔒 Security
 
 - **No eval usage** - Safe configuration parsing
@@ -309,18 +382,22 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔄 Changelog
 
-### v0.9.0 (Latest)
-- ✨ Professional installer with multiple modes
-- ✨ Automatic Python version detection
-- ✨ Centralized module architecture
-- 🔒 Security improvements (no eval)
-- 🎨 Centralized color management
-- 📦 Clean uninstaller
-- 🐛 Multiple bug fixes
-
-### v0.8.0
-- Initial public release
+For a detailed list of changes and version history, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-Made with ❤️ by Tim Wickstrom for the macOS community
+## ⭐ Star History
+
+If you find TM-Monitor useful, please star ⭐ this repository!
+
+## 📜 License
+
+MIT License - See [LICENSE](LICENSE) file for details.
+
+---
+
+<div align="center">
+Made with ❤️ for the Apple macOS community by Tim Wickstrom
+
+**[Report Bug](https://github.com/twickstrom/TimeMachineMonitor/issues) · [Request Feature](https://github.com/twickstrom/TimeMachineMonitor/issues) · [Contribute](CONTRIBUTING.md)**
+</div>
