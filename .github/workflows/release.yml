@@ -1,0 +1,217 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version from version.sh
+        id: get_version
+        run: |
+          VERSION=$(grep 'TM_MONITOR_VERSION=' lib/version.sh | cut -d'"' -f2)
+          echo "VERSION=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "VERSION_NO_V=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists and determine release version
+        id: determine_version
+        run: |
+          CURRENT_VERSION="${{ steps.get_version.outputs.VERSION_NO_V }}"
+          CURRENT_TAG="v${CURRENT_VERSION}"
+
+          # Check if current version tag exists
+          if git rev-parse "$CURRENT_TAG" >/dev/null 2>&1; then
+            echo "Current version $CURRENT_TAG already exists, auto-incrementing patch version..."
+
+            # Parse version components
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+            # Find the next available patch version
+            NEW_PATCH=$((PATCH + 1))
+            while git rev-parse "v${MAJOR}.${MINOR}.${NEW_PATCH}" >/dev/null 2>&1; do
+              echo "v${MAJOR}.${MINOR}.${NEW_PATCH} exists, trying next..."
+              NEW_PATCH=$((NEW_PATCH + 1))
+            done
+
+            NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+            NEW_TAG="v${NEW_VERSION}"
+
+            echo "Will create release with auto-incremented version: $NEW_TAG"
+            echo "NEEDS_VERSION_UPDATE=true" >> $GITHUB_OUTPUT
+            echo "RELEASE_VERSION=$NEW_TAG" >> $GITHUB_OUTPUT
+            echo "RELEASE_VERSION_NO_V=$NEW_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Version $CURRENT_TAG does not exist, will create release"
+            echo "NEEDS_VERSION_UPDATE=false" >> $GITHUB_OUTPUT
+            echo "RELEASE_VERSION=$CURRENT_TAG" >> $GITHUB_OUTPUT
+            echo "RELEASE_VERSION_NO_V=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version files if needed
+        if: steps.determine_version.outputs.NEEDS_VERSION_UPDATE == 'true'
+        run: |
+          NEW_VERSION="${{ steps.determine_version.outputs.RELEASE_VERSION_NO_V }}"
+
+          # Update version.sh
+          sed -i "s/TM_MONITOR_VERSION=\".*\"/TM_MONITOR_VERSION=\"${NEW_VERSION}\"/" lib/version.sh
+
+          # Update build date
+          sed -i "s/TM_MONITOR_BUILD_DATE=\".*\"/TM_MONITOR_BUILD_DATE=\"$(date +%Y-%m-%d)\"/" lib/version.sh
+
+          # Update README.md version badge
+          sed -i "s/version-[0-9]\+\.[0-9]\+\.[0-9]\+-blue/version-${NEW_VERSION}-blue/g" README.md
+
+          # Commit the version updates
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add lib/version.sh README.md
+          git commit -m "Auto-increment version to ${NEW_VERSION} [skip ci]" || echo "No changes to commit"
+          git push origin main
+
+      - name: Update README version badge (even if version not incremented)
+        if: steps.determine_version.outputs.NEEDS_VERSION_UPDATE == 'false'
+        run: |
+          RELEASE_VERSION="${{ steps.determine_version.outputs.RELEASE_VERSION_NO_V }}"
+
+          # Check if README badge needs updating
+          if ! grep -q "version-${RELEASE_VERSION}-blue" README.md; then
+            sed -i "s/version-[0-9]\+\.[0-9]\+\.[0-9]\+-blue/version-${RELEASE_VERSION}-blue/g" README.md
+
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "Update README version badge to ${RELEASE_VERSION} [skip ci]" || echo "No changes to commit"
+            git push origin main
+          fi
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.determine_version.outputs.RELEASE_VERSION }}" \
+            -m "Release ${{ steps.determine_version.outputs.RELEASE_VERSION }}"
+          git push origin "${{ steps.determine_version.outputs.RELEASE_VERSION }}"
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          VERSION_NO_V="${{ steps.determine_version.outputs.RELEASE_VERSION_NO_V }}"
+          
+          # Try to extract changelog for this version from CHANGELOG.md
+          sed -n "/^## \[${VERSION_NO_V}\]/,/^## \[/p" CHANGELOG.md | \
+            sed '$d' | tail -n +2 > release_notes.md
+          
+          # Check if we found a changelog entry
+          if [ -s release_notes.md ]; then
+            echo "Found changelog entry for version ${VERSION_NO_V}"
+          else
+            # No specific changelog entry - this means either:
+            # 1. Version was auto-incremented (NEEDS_VERSION_UPDATE = true)
+            # 2. User forgot to update CHANGELOG.md
+            
+            if [ "${{ steps.determine_version.outputs.NEEDS_VERSION_UPDATE }}" == "true" ]; then
+              # Version was auto-incremented - create nice release notes from commits
+              echo "## Patch Release ${VERSION_NO_V}" > release_notes.md
+              echo "" >> release_notes.md
+              echo "This is an automated patch release containing recent improvements and fixes." >> release_notes.md
+              echo "" >> release_notes.md
+              
+              # Get the last tag to compare against
+              LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+              
+              if [ -n "$LAST_TAG" ]; then
+                echo "### Changes since ${LAST_TAG}:" >> release_notes.md
+                echo "" >> release_notes.md
+                
+                # Get commit messages since last tag, formatted nicely
+                git log ${LAST_TAG}..HEAD --pretty=format:"- %s" --reverse | \
+                  grep -v "\[skip ci\]" | \
+                  grep -v "Auto-increment version" | \
+                  head -20 >> release_notes.md
+                
+                # Add summary counts
+                echo "" >> release_notes.md
+                echo "" >> release_notes.md
+                echo "### Summary:" >> release_notes.md
+                COMMIT_COUNT=$(git rev-list ${LAST_TAG}..HEAD --count)
+                FILE_COUNT=$(git diff --name-only ${LAST_TAG}..HEAD | wc -l | tr -d ' ')
+                echo "- ${COMMIT_COUNT} commits" >> release_notes.md
+                echo "- ${FILE_COUNT} files changed" >> release_notes.md
+                
+                # Try to categorize changes by directory
+                echo "" >> release_notes.md
+                echo "### Affected Components:" >> release_notes.md
+                
+                # Check which directories were modified
+                if git diff --name-only ${LAST_TAG}..HEAD | grep -q "^bin/"; then
+                  echo "- **Core Scripts**: Updates to main executables" >> release_notes.md
+                fi
+                if git diff --name-only ${LAST_TAG}..HEAD | grep -q "^lib/"; then
+                  echo "- **Libraries**: Internal improvements and bug fixes" >> release_notes.md
+                fi
+                if git diff --name-only ${LAST_TAG}..HEAD | grep -q "^docs/"; then
+                  echo "- **Documentation**: Documentation updates" >> release_notes.md
+                fi
+                if git diff --name-only ${LAST_TAG}..HEAD | grep -q "^tests/"; then
+                  echo "- **Tests**: Test improvements" >> release_notes.md
+                fi
+                if git diff --name-only ${LAST_TAG}..HEAD | grep -q "\.github/"; then
+                  echo "- **CI/CD**: Workflow and automation updates" >> release_notes.md
+                fi
+                
+              else
+                # No previous tag found
+                echo "This is a maintenance release with minor improvements and bug fixes." >> release_notes.md
+                echo "" >> release_notes.md
+                echo "### Recent changes:" >> release_notes.md
+                echo "" >> release_notes.md
+                # Get last 10 commits
+                git log -10 --pretty=format:"- %s" --reverse | \
+                  grep -v "\[skip ci\]" | \
+                  grep -v "Auto-increment version" >> release_notes.md
+              fi
+              
+              echo "" >> release_notes.md
+              echo "---" >> release_notes.md
+              echo "" >> release_notes.md
+              echo "*This is an automated patch release. Version auto-incremented from ${{ steps.get_version.outputs.VERSION_NO_V }} to ${VERSION_NO_V}*" >> release_notes.md
+              echo "" >> release_notes.md
+              echo "*For complete version history, see [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)*" >> release_notes.md
+              
+            else
+              # Version was not auto-incremented but no changelog found
+              # This means user updated version.sh but forgot CHANGELOG.md
+              echo "### Release ${VERSION_NO_V}" > release_notes.md
+              echo "" >> release_notes.md
+              echo "No changelog entry found for this version." >> release_notes.md
+              echo "" >> release_notes.md
+              echo "Recent commits:" >> release_notes.md
+              echo "" >> release_notes.md
+              git log -5 --pretty=format:"- %s" --reverse >> release_notes.md
+              echo "" >> release_notes.md
+              echo "" >> release_notes.md
+              echo "*Please update [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) with release notes.*" >> release_notes.md
+            fi
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.determine_version.outputs.RELEASE_VERSION }}
+          name: Release ${{ steps.determine_version.outputs.RELEASE_VERSION }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: false
+          generate_release_notes: true
