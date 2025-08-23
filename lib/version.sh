@@ -6,8 +6,8 @@
 export _VERSION_SOURCED=1
 
 # Version information
-readonly TM_MONITOR_VERSION="0.9.1"
-readonly TM_MONITOR_BUILD_DATE="2025-01-01"
+readonly TM_MONITOR_VERSION="0.10.0"
+readonly TM_MONITOR_BUILD_DATE="2025-08-23"
 readonly TM_MONITOR_MIN_MACOS="14"
 readonly TM_MONITOR_MIN_PYTHON="3.8"
 
