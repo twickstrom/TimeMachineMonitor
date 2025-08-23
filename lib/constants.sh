@@ -43,9 +43,12 @@ readonly STATUS_MAINTENANCE="🟡"
 readonly STATUS_SYSTEM="🔵"
 readonly STATUS_IDLE="⚪"
 
+# Initialize TABLE_COLUMNS to avoid unbound variable
+: ${TABLE_COLUMNS:=}
+
 # Table column definitions
 # Format: "header:width:alignment"
-readonly -a TABLE_COLUMNS=(
+TABLE_COLUMNS=(
     "Time:8:left"
     "Phase:32:left"
     "Speed:12:right"
@@ -66,15 +69,21 @@ calculate_minimum_width() {
     local total_width=0
     local width
 
-    for column in "${TABLE_COLUMNS[@]}"; do
-        # Extract width from format "header:width:alignment"
-        width="${column#*:}"        # Remove header
-        width="${width%%:*}"         # Remove alignment
-        total_width=$((total_width + width + 2))  # +2 for padding
-    done
+    if [[ ${#TABLE_COLUMNS[@]} -gt 0 ]]; then
+        for column in "${TABLE_COLUMNS[@]}"; do
+            # Extract width from format "header:width:alignment"
+            width="${column#*:}"        # Remove header
+            width="${width%%:*}"         # Remove alignment
+            total_width=$((total_width + width + 2))  # +2 for padding
+        done
+    fi
 
     # Add border characters (number of columns + 1 for vertical separators)
-    total_width=$((total_width + ${#TABLE_COLUMNS[@]} + 1))
+    if [[ ${#TABLE_COLUMNS[@]} -gt 0 ]]; then
+        total_width=$((total_width + ${#TABLE_COLUMNS[@]} + 1))
+    else
+        total_width=$((total_width + 1))
+    fi
 
     echo "$total_width"
 }

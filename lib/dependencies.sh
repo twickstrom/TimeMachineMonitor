@@ -8,9 +8,13 @@ export _DEPENDENCIES_SOURCED=1
 # Source required modules
 source "$(dirname "${BASH_SOURCE[0]}")/python_check.sh"
 
-# Required commands for tm-monitor
-declare -a REQUIRED_COMMANDS=(tmutil plutil)
-declare -a OPTIONAL_COMMANDS=(bc tput stty)
+# Initialize arrays with default values to avoid unbound variable errors
+: ${REQUIRED_COMMANDS:=}
+: ${OPTIONAL_COMMANDS:=}
+
+# Required commands for tm-monitor  
+REQUIRED_COMMANDS=(tmutil plutil)
+OPTIONAL_COMMANDS=(bc tput stty)
 
 # Check if command exists
 command_exists() {
@@ -97,7 +101,7 @@ check_dependencies() {
     
     # Report warnings
     if [[ ${#warnings[@]} -gt 0 ]]; then
-        for warning in "${warnings[@]}"; do
+        for warning in "${warnings[@]:-}"; do
             echo "Warning: $warning" >&2
         done
     fi
@@ -105,7 +109,7 @@ check_dependencies() {
     # Report errors and fail if any
     if [[ ${#errors[@]} -gt 0 ]]; then
         echo "Dependency check failed:" >&2
-        for error in "${errors[@]}"; do
+        for error in "${errors[@]:-}"; do
             echo "  ✗ $error" >&2
         done
         return 1

@@ -39,6 +39,9 @@ CURRENT_COPIED_TOTAL="-"
 CURRENT_PCT_TOTAL="-"
 CURRENT_ETA="-"
 
+# Initialize SPEED_SAMPLES to avoid unbound variable
+: ${SPEED_SAMPLES:=}
+
 # Speed samples for averaging
 SPEED_SAMPLES=()
 MAX_SPEED_SAMPLES=30
@@ -137,9 +140,11 @@ get_average_speed() {
 
     [[ "$count" -eq 0 ]] && echo "0" && return 0
 
-    for speed in "${SPEED_SAMPLES[@]}"; do
-        ((total += speed))
-    done
+    if [[ ${#SPEED_SAMPLES[@]} -gt 0 ]]; then
+        for speed in "${SPEED_SAMPLES[@]}"; do
+            ((total += speed))
+        done
+    fi
 
     echo "$((total / count))"
     return 0

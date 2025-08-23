@@ -12,6 +12,10 @@
 # Display state
 TABLE_WIDTH=0
 TERMINAL_WIDTH=80
+# Initialize arrays to avoid unbound variable errors
+: ${COLUMN_HEADERS:=}
+: ${COLUMN_WIDTHS:=}
+: ${COLUMN_ALIGNS:=}
 COLUMN_HEADERS=()
 COLUMN_WIDTHS=()
 COLUMN_ALIGNS=()
@@ -44,12 +48,14 @@ init_display() {
 _parse_table_definition() {
     local header width align
 
-    for definition in "${TABLE_COLUMNS[@]}"; do
-        IFS=':' read -r header width align <<< "$definition"
-        COLUMN_HEADERS+=("$header")
-        COLUMN_WIDTHS+=("$width")
-        COLUMN_ALIGNS+=("$align")
-    done
+    if [[ ${#TABLE_COLUMNS[@]} -gt 0 ]]; then
+        for definition in "${TABLE_COLUMNS[@]}"; do
+            IFS=':' read -r header width align <<< "$definition"
+            COLUMN_HEADERS+=("$header")
+            COLUMN_WIDTHS+=("$width")
+            COLUMN_ALIGNS+=("$align")
+        done
+    fi
 }
 
 # Check if table fits in terminal
@@ -73,31 +79,33 @@ _generate_border() {
     local result=""
     local i width total_width
 
-    for i in "${!COLUMN_WIDTHS[@]}"; do
-        width="${COLUMN_WIDTHS[$i]}"
-        total_width=$((width + 2))  # Add padding
+    if [[ ${#COLUMN_WIDTHS[@]} -gt 0 ]]; then
+        for i in "${!COLUMN_WIDTHS[@]}"; do
+            width="${COLUMN_WIDTHS[$i]}"
+            total_width=$((width + 2))  # Add padding
 
-        if [[ $i -eq 0 ]]; then
-            # First column
-            case "$type" in
-                top)    result+="$BOX_TOP_LEFT" ;;
-                middle) result+="$BOX_MIDDLE_LEFT" ;;
-                bottom) result+="$BOX_BOTTOM_LEFT" ;;
-            esac
-        else
-            # Middle columns
-            case "$type" in
-                top)    result+="$BOX_TOP_MIDDLE" ;;
-                middle) result+="$BOX_MIDDLE" ;;
-                bottom) result+="$BOX_BOTTOM_MIDDLE" ;;
-            esac
-        fi
+            if [[ $i -eq 0 ]]; then
+                # First column
+                case "$type" in
+                    top)    result+="$BOX_TOP_LEFT" ;;
+                    middle) result+="$BOX_MIDDLE_LEFT" ;;
+                    bottom) result+="$BOX_BOTTOM_LEFT" ;;
+                esac
+            else
+                # Middle columns
+                case "$type" in
+                    top)    result+="$BOX_TOP_MIDDLE" ;;
+                    middle) result+="$BOX_MIDDLE" ;;
+                    bottom) result+="$BOX_BOTTOM_MIDDLE" ;;
+                esac
+            fi
 
-        # Add horizontal lines
-        for ((j=0; j<total_width; j++)); do
-            result+="$BOX_HORIZONTAL"
+            # Add horizontal lines
+            for ((j=0; j<total_width; j++)); do
+                result+="$BOX_HORIZONTAL"
+            done
         done
-    done
+    fi
 
     # End piece
     case "$type" in
@@ -114,16 +122,18 @@ _generate_row_format() {
     local fmt=""
     local i width align
 
-    for i in "${!COLUMN_WIDTHS[@]}"; do
-        width="${COLUMN_WIDTHS[$i]}"
-        align="${COLUMN_ALIGNS[$i]}"
+    if [[ ${#COLUMN_WIDTHS[@]} -gt 0 ]]; then
+        for i in "${!COLUMN_WIDTHS[@]}"; do
+            width="${COLUMN_WIDTHS[$i]}"
+            align="${COLUMN_ALIGNS[$i]}"
 
-        if [[ "$align" == "left" ]]; then
-            fmt+="$BOX_VERTICAL %-${width}s "
-        else
-            fmt+="$BOX_VERTICAL %${width}s "
-        fi
-    done
+            if [[ "$align" == "left" ]]; then
+                fmt+="$BOX_VERTICAL %-${width}s "
+            else
+                fmt+="$BOX_VERTICAL %${width}s "
+            fi
+        done
+    fi
     fmt+="$BOX_VERTICAL\n"
 
     echo "$fmt"
@@ -132,7 +142,9 @@ _generate_row_format() {
 # Print table header
 print_header() {
     printf "%s\n" "$TOP_BORDER"
-    printf "$ROW_FORMAT" "${COLUMN_HEADERS[@]}"
+    if [[ ${#COLUMN_HEADERS[@]} -gt 0 ]]; then
+        printf "$ROW_FORMAT" "${COLUMN_HEADERS[@]}"
+    fi
     printf "%s\n" "$MIDDLE_BORDER"
 }
 
@@ -220,13 +232,19 @@ print_data_row() {
     
     # Phase column needs special handling for colored text and emoji
     # Reduce width by 1 to account for emoji taking 2 display columns
-    local phase_width=$((${COLUMN_WIDTHS[1]} - 1))
+    local phase_width=31  # Default if not set
+    if [[ ${#COLUMN_WIDTHS[@]} -gt 1 ]]; then
+        phase_width=$((${COLUMN_WIDTHS[1]} - 1))
+    fi
     local padded_phase="$(format_colored_column "$colored_phase" "$phase_width" "left")"
     printf "%s" "$padded_phase"
     
     # Rest of the columns
     # Speed column needs padding for colored text
-    local speed_width="${COLUMN_WIDTHS[2]}"
+    local speed_width=12  # Default if not set
+    if [[ ${#COLUMN_WIDTHS[@]} -gt 2 ]]; then
+        speed_width="${COLUMN_WIDTHS[2]}"
+    fi
     local padded_speed="$(format_colored_column "$colored_speed" "$speed_width" "right")"
     printf " $BOX_VERTICAL %s " "$padded_speed"
     
@@ -255,7 +273,10 @@ print_idle_row() {
     
     # Phase column needs special handling for colored text and emoji
     # Reduce width by 1 to account for emoji taking 2 display columns
-    local phase_width=$((${COLUMN_WIDTHS[1]} - 1))
+    local phase_width=31  # Default if not set
+    if [[ ${#COLUMN_WIDTHS[@]} -gt 1 ]]; then
+        phase_width=$((${COLUMN_WIDTHS[1]} - 1))
+    fi
     local padded_phase="$(format_colored_column "$colored_phase" "$phase_width" "left")"
     printf "%s" "$padded_phase"
     

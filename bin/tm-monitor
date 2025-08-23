@@ -1,37 +1,15 @@
 #!/usr/bin/env bash
 # tm-monitor - Time Machine backup monitor main script
+# Optimized version using centralized core.sh initialization
 
 set -uo pipefail  # Removed -e to prevent early exit
-export LC_ALL=en_US.UTF-8
 
-# Initialize paths using centralized path management
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Initialize using core.sh - this replaces all the bootstrap and sourcing code
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/core.sh"
+tm_monitor_init "${BASH_SOURCE[0]}" "standard"
 
-# Temporary bootstrap to find paths.sh
-if [[ -d "$SCRIPT_DIR/../lib" ]]; then
-    source "$SCRIPT_DIR/../lib/paths.sh"
-else
-    source "${LIB_DIR:-$HOME/.local/lib/tm-monitor}/paths.sh"
-fi
-
-# Initialize all paths
-determine_paths "${BASH_SOURCE[0]}"
-LIB_DIR="$TM_LIB_DIR"
-HELPER_SCRIPT="$TM_HELPER_SCRIPT"
-
-# Source all libraries in order
-source "$LIB_DIR/version.sh"       # Version management
-source "$LIB_DIR/colors.sh"        # Color definitions
-source "$LIB_DIR/python_check.sh"  # Python detection
-source "$LIB_DIR/dependencies.sh"  # Dependency checking
-source "$LIB_DIR/constants.sh"     # Constants and defaults
-source "$LIB_DIR/formatting.sh"    # Centralized formatting functions
-source "$LIB_DIR/logger.sh"        # Logging functionality
-source "$LIB_DIR/config.sh"        # Configuration loading
-source "$LIB_DIR/tmutil.sh"        # Centralized tmutil parsing
-source "$LIB_DIR/process.sh"       # Process management
-source "$LIB_DIR/state.sh"         # State management
-source "$LIB_DIR/display.sh"       # Display and UI
+# Source argument parsing
+source "$TM_LIB_DIR/arguments.sh"
 
 # Usage information
 usage() {
@@ -78,61 +56,7 @@ EOF
     exit 0
 }
 
-# Parse command line arguments
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -i|--interval)
-                [[ $# -lt 2 ]] && fatal "Missing value for $1"
-                export TM_INTERVAL="$2"
-                shift 2
-                ;;
-            -u|--units)
-                [[ $# -lt 2 ]] && fatal "Missing value for $1"
-                export TM_UNITS="$2"
-                shift 2
-                ;;
-            -w|--window)
-                [[ $# -lt 2 ]] && fatal "Missing value for $1"
-                export TM_SPEED_WINDOW="$2"
-                export TM_INITIAL_BACKUP_WINDOW="$2"
-                shift 2
-                ;;
-            -c|--no-colors)
-                export TM_SHOW_COLORS="false"
-                shift
-                ;;
-            -s|--no-summary)
-                export TM_SHOW_SUMMARY="false"
-                shift
-                ;;
-            -d|--debug)
-                export TM_DEBUG="true"
-                shift
-                ;;
-            -l|--csv-log)
-                export TM_CSV_LOG="true"
-                shift
-                ;;
-            -C|--create-config)
-                create_sample_config
-                exit 0
-                ;;
-            -v|--version)
-                get_version_info
-                exit 0
-                ;;
-            -h|--help)
-                usage
-                ;;
-            *)
-                fatal "Unknown option: $1 (use --help for usage)"
-                ;;
-        esac
-    done
-}
-
-# Main monitoring loop
+# Main monitoring loop - simplified to pure orchestration
 monitor_loop() {
     local consecutive_failures=0
     local json_data
@@ -154,17 +78,13 @@ monitor_loop() {
             # Update state with new data
             update_state "$json_data"
 
-            # Check if backup is running
+            # Check if backup is running and display appropriate row
             if is_backup_running; then
-                # Cache dynamic values for display continuity
                 cache_dynamic_values
-
-                # Print data row
                 print_data_row
             else
                 print_idle_row
             fi
-
         else
             ((consecutive_failures++))
             debug "Failed to get tmutil status ($consecutive_failures/$MAX_FAILURES)"
@@ -180,28 +100,50 @@ monitor_loop() {
     done
 }
 
-# Show session summary
-show_summary() {
-    [[ "$SHOW_SUMMARY" != "true" ]] && return
-
-    echo
-    get_session_summary
-
-    if [[ "$CSV_LOG" == "true" ]] && [[ -n "${CSV_LOG_FILE:-}" ]]; then
-        info "CSV log: $CSV_LOG_FILE"
+# Setup helper process with initial backup detection
+setup_helper() {
+    if [[ ! -x "$HELPER_SCRIPT" ]]; then
+        warn "Helper script not found at: $HELPER_SCRIPT"
+        warn "Using inline processing (slower)"
+        return 1
     fi
+
+    if [[ -z "${TM_PYTHON_CMD:-}" ]]; then
+        warn "Python 3 not found, using inline processing (slower)"
+        return 1
+    fi
+
+    # Export required environment for helper
+    export PYTHON_CMD="$TM_PYTHON_CMD"
+    export TM_UNITS="$UNITS"
+    
+    # Check if this is an initial backup and set appropriate window
+    local json_test
+    if json_test=$(get_tmutil_json 2>/dev/null); then
+        if echo "$json_test" | grep -q '"FirstBackup":"1"'; then
+            debug "Initial backup detected, using 90 second smoothing window"
+            export TM_SPEED_WINDOW="${TM_INITIAL_BACKUP_WINDOW:-90}"
+            export TM_INITIAL_BACKUP_WINDOW="${TM_INITIAL_BACKUP_WINDOW:-90}"
+        else
+            export TM_SPEED_WINDOW="${TM_SPEED_WINDOW:-30}"
+        fi
+    else
+        export TM_SPEED_WINDOW="${TM_SPEED_WINDOW:-30}"
+    fi
+    
+    start_helper_process "$HELPER_SCRIPT"
+    return 0
 }
 
-# Main entry point
+# Main entry point - significantly simplified
 main() {
-    # Parse arguments first
-    parse_args "$@"
-
-    # Load configuration
-    load_config
+    # Parse arguments using centralized function
+    if ! parse_tm_monitor_args "$@"; then
+        usage
+    fi
 
     # Initialize logging
-    init_logging "$DEBUG" "$CSV_LOG"
+    init_logging "${DEBUG:-false}" "${CSV_LOG:-false}"
 
     debug "Starting tm-monitor v$(get_version)"
     debug "Config: INTERVAL=$INTERVAL, UNITS=$UNITS, SHOW_COLORS=$SHOW_COLORS"
@@ -209,49 +151,19 @@ main() {
     # Check dependencies and single instance
     check_dependencies false  # false = not verbose
     check_single_instance
-    
-    # Ensure all directories exist
-    ensure_directories
 
     # Initialize subsystems
     init_process_management
     init_session
     init_display
 
-    # Start helper process using detected Python
-    if [[ -x "$HELPER_SCRIPT" ]]; then
-        # Python should already be detected by check_dependencies
-        if [[ -n "${TM_PYTHON_CMD:-}" ]]; then
-            export PYTHON_CMD="$TM_PYTHON_CMD"
-            export TM_UNITS="$UNITS"
-            
-            # Check if this is an initial backup and set appropriate window
-            local json_test
-            if json_test=$(get_tmutil_json 2>/dev/null); then
-                if echo "$json_test" | grep -q '"FirstBackup":"1"'; then
-                    debug "Initial backup detected, using 90 second smoothing window"
-                    export TM_SPEED_WINDOW="${INITIAL_BACKUP_WINDOW:-90}"
-                    export TM_INITIAL_BACKUP_WINDOW="${INITIAL_BACKUP_WINDOW:-90}"
-                else
-                    export TM_SPEED_WINDOW="${SPEED_WINDOW:-30}"
-                fi
-            else
-                export TM_SPEED_WINDOW="${SPEED_WINDOW:-30}"
-            fi
-            
-            start_helper_process "$HELPER_SCRIPT"
-        else
-            warn "Python 3 not found, using inline processing (slower)"
-        fi
-    else
-        warn "Helper script not found at: $HELPER_SCRIPT"
-        warn "Using inline processing (slower)"
-    fi
+    # Start helper process if available
+    setup_helper
 
     # Run monitoring loop
     monitor_loop
 
-    # Cleanup will handle footer and summary
+    # Cleanup will handle footer and summary via process.sh trap
 }
 
 # Run main function
