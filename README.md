@@ -2,7 +2,7 @@
 
 A powerful, real-time Apple Time Machine backup monitor for macOS Sonoma+ with advanced analytics and resource tracking.
 
-![Version](https://img.shields.io/badge/version-0.10.0-blue)
+![Version](https://img.shields.io/badge/version-0.11.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-purple)
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon%20%7C%20Intel-lightgrey)
 ![Size](https://img.shields.io/github/repo-size/twickstrom/TimeMachineMonitor)
