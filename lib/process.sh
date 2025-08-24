@@ -149,16 +149,31 @@ cleanup_and_exit() {
 
     debug "Starting cleanup..."
 
-    # Clear current line
-    printf "\r\033[K"
-    
-    # Print bottom border if we were showing the table
-    if [[ -n "${SESSION_START_TIME:-}" ]]; then
-        print_footer
+    # Only clear and print footer if we haven't already done so
+    if [[ "${FOOTER_PRINTED:-false}" != "true" ]]; then
+        # Clear current line
+        printf "\r\033[K"
+        
+        # Print bottom border if we were showing the table
+        if [[ -n "${SESSION_START_TIME:-}" ]]; then
+            print_footer
+            export FOOTER_PRINTED=true
+        fi
     fi
 
     # Stop helper process
     stop_helper_process
+    
+    # End storage session if it's still active
+    if [[ -n "${STORAGE_SESSION_ID:-}" ]] && [[ "${STORAGE_AVAILABLE:-false}" == "true" ]]; then
+        # Check if backup was completed (marked elsewhere) or use default
+        local completed="${BACKUP_COMPLETED:-0}"
+        end_storage_session "$completed"
+    fi
+    
+    # Close file descriptors if open
+    exec 3>&- 2>/dev/null || true
+    exec 4>&- 2>/dev/null || true
 
     # Remove PID file
     rm -f "$TM_PID_FILE"
@@ -187,6 +202,17 @@ cleanup_and_exit() {
 
 # Check if another instance is running
 check_single_instance() {
+    # First, check for any running tm-monitor processes
+    local running_pids
+    running_pids=$(pgrep -f "bash.*tm-monitor$" 2>/dev/null | grep -v "^$\$" || true)
+    
+    if [[ -n "$running_pids" ]]; then
+        error "Found existing tm-monitor processes: $running_pids"
+        error "Kill them with: kill $running_pids"
+        fatal "Another instance is already running"
+    fi
+    
+    # Also check the PID file
     if [[ -f "$TM_PID_FILE" ]]; then
         local old_pid
         old_pid="$(cat "$TM_PID_FILE" 2>/dev/null)"
@@ -195,9 +221,51 @@ check_single_instance() {
             fatal "Another instance is already running (PID: $old_pid)"
         else
             # Stale PID file, remove it
+            debug "Removing stale PID file for process $old_pid"
             rm -f "$TM_PID_FILE"
         fi
     fi
+}
+
+# Kill all tm-monitor instances (utility function)
+kill_all_tm_monitor() {
+    local killed=0
+    
+    # Find all tm-monitor processes
+    local pids
+    pids=$(pgrep -f "bash.*tm-monitor" 2>/dev/null || true)
+    
+    if [[ -n "$pids" ]]; then
+        echo "Killing tm-monitor processes: $pids"
+        for pid in $pids; do
+            if [[ "$pid" != "$" ]]; then  # Don't kill ourselves
+                kill "$pid" 2>/dev/null && ((killed++))
+            fi
+        done
+    fi
+    
+    # Also kill any helper processes
+    local helper_pids
+    helper_pids=$(pgrep -f "tm-monitor-helper" 2>/dev/null || true)
+    
+    if [[ -n "$helper_pids" ]]; then
+        echo "Killing helper processes: $helper_pids"
+        for pid in $helper_pids; do
+            kill "$pid" 2>/dev/null && ((killed++))
+        done
+    fi
+    
+    # Clean up PID file and pipes
+    rm -f "$TM_PID_FILE"
+    rm -f "$TM_CACHE_DIR"/helper.{in,out}
+    
+    if [[ $killed -gt 0 ]]; then
+        echo "Killed $killed tm-monitor related processes"
+    else
+        echo "No tm-monitor processes found"
+    fi
+    
+    return 0
 }
 
 # Export functions

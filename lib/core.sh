@@ -59,9 +59,22 @@ tm_monitor_init() {
             ;;
     esac
     
-    # Common initialization tasks
-    load_config
-    ensure_directories
+    # Common initialization tasks only if config.sh is loaded
+    if [[ "$lib_selection" != "minimal" ]]; then
+        load_config
+        ensure_directories
+        
+        # Load update module and check for updates (only for main tm-monitor script)
+        if [[ "$(basename "$script_path")" == "tm-monitor" ]] && [[ -f "$TM_LIB_DIR/updates.sh" ]]; then
+            source "$TM_LIB_DIR/updates.sh"
+            
+            # First-run setup for update preferences
+            first_run_update_setup
+            
+            # Auto-check for updates in background
+            auto_check_updates
+        fi
+    fi
     
     # Initialize colors based on config
     init_colors "${SHOW_COLORS:-true}"

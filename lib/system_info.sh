@@ -14,6 +14,9 @@ export _SYSTEM_INFO_SOURCED=1
 
 # Get number of CPU cores
 # Returns: Number of CPU cores (defaults to 4 if detection fails)
+# WARNING: Do NOT cache this value in a monitoring loop - while CPU cores don't
+#          change during execution, caching prevents proper function testing
+#          and makes the code less modular. The sysctl call is very fast.
 get_cpu_cores() {
     sysctl -n hw.ncpu 2>/dev/null || echo 4
 }
@@ -42,12 +45,15 @@ get_cpu_brand() {
 
 # Get total system memory in bytes
 # Returns: Total memory in bytes
+# WARNING: Do NOT cache this value - memory info should always be fresh
+#          for accurate monitoring. The sysctl call is fast.
 get_total_memory_bytes() {
     sysctl -n hw.memsize 2>/dev/null || echo 0
 }
 
 # Get total system memory in GB
 # Returns: Total memory in GB with 2 decimal places
+# WARNING: Do NOT cache this value - see get_total_memory_bytes warning
 get_total_memory_gb() {
     local bytes
     bytes=$(get_total_memory_bytes)
@@ -86,6 +92,9 @@ get_memory_pressure() {
 
 # Get load averages as three pipe-separated values
 # Returns: load1|load5|load15
+# WARNING: NEVER cache load averages! These values change constantly and
+#          caching them defeats the purpose of real-time monitoring.
+#          The uptime command is very fast.
 get_load_averages() {
     local load_output
     load_output=$(uptime | awk -F'load averages?: ' '{print $2}' 2>/dev/null)
@@ -262,6 +271,8 @@ is_system_loaded() {
 
 # Get system load status
 # Returns: "Normal", "Elevated", or "High"
+# WARNING: Do NOT cache - this function calls get_load_1min which
+#          must return real-time data for accurate monitoring
 get_load_status() {
     local cores load1
     

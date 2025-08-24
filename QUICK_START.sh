@@ -67,10 +67,13 @@ if ./install.sh; then
         echo
     fi
     
-    echo "Quick test commands:"
+    echo "Quick commands:"
+    echo "  ${GREEN}tm-dashboard${RESET}         # Launch split-screen dashboard (recommended)"
     echo "  tm-monitor --version     # Check version"
     echo "  tm-monitor --help        # Show help"
-    echo "  tm-monitor               # Start monitoring"
+    echo "  tm-monitor               # Start monitoring (single window)"
+    echo
+    echo -e "${BLUE}To get started, run: ${GREEN}tm-dashboard${RESET}"
     echo
     echo -e "${BLUE}Enjoy monitoring your Time Machine backups!${RESET}"
 else

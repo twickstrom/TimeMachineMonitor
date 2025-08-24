@@ -50,6 +50,7 @@ OPTIONS:
     --prefix PATH      Installation prefix (default: $HOME/.local)
     --system          Install system-wide (requires sudo)
     --dev              Development installation (symlinks)
+    --update          Update mode (preserve config and data)
     --uninstall       Remove tm-monitor
     --check-only      Only check dependencies, don't install
     --help            Show this help message
@@ -225,17 +226,24 @@ create_directories() {
 install_files() {
     info "Installing files..."
     
+    # Pass update_mode to the function
+    local update_mode="${1:-false}"
+    
     # Install binaries
     if [[ "$INSTALL_MODE" == "system" ]]; then
         sudo cp bin/tm-monitor "$BINDIR/"
         sudo cp bin/tm-monitor-resources "$BINDIR/"
-        sudo chmod +x "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources"
+        sudo cp bin/tm-monitor-stats "$BINDIR/"
+        sudo cp bin/tm-dashboard "$BINDIR/"
+        sudo chmod +x "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources" "$BINDIR/tm-monitor-stats" "$BINDIR/tm-dashboard"
     else
         cp bin/tm-monitor "$BINDIR/"
         cp bin/tm-monitor-resources "$BINDIR/"
-        chmod +x "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources"
+        cp bin/tm-monitor-stats "$BINDIR/"
+        cp bin/tm-dashboard "$BINDIR/"
+        chmod +x "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources" "$BINDIR/tm-monitor-stats" "$BINDIR/tm-dashboard"
     fi
-    success "Installed: tm-monitor, tm-monitor-resources"
+    success "Installed: tm-monitor, tm-monitor-resources, tm-monitor-stats, tm-dashboard"
     
     # Install helper and libraries
     if [[ "$INSTALL_MODE" == "system" ]]; then
@@ -249,14 +257,25 @@ install_files() {
     fi
     success "Installed: helper script and libraries"
     
-    # Install config example
-    if [[ ! -f "$CONFIGDIR/config.conf" ]]; then
-        if [[ "$INSTALL_MODE" == "system" ]]; then
-            sudo cp config/tm-monitor.conf.example "$CONFIGDIR/config.conf.example"
+    # Install config example (if not updating or if it doesn't exist)
+    if [[ "$update_mode" != "true" ]] || [[ ! -f "$CONFIGDIR/config.conf.example" ]]; then
+        if [[ -f "config/config.conf.example" ]]; then
+            local config_source="config/config.conf.example"
+        elif [[ -f "config/tm-monitor.conf.example" ]]; then
+            local config_source="config/tm-monitor.conf.example"
         else
-            cp config/tm-monitor.conf.example "$CONFIGDIR/config.conf.example"
+            warning "Config example not found"
+            return
+        fi
+        
+        if [[ "$INSTALL_MODE" == "system" ]]; then
+            sudo cp "$config_source" "$CONFIGDIR/config.conf.example"
+        else
+            cp "$config_source" "$CONFIGDIR/config.conf.example"
         fi
         success "Installed: config example"
+    elif [[ "$update_mode" == "true" ]]; then
+        info "Preserving existing configuration"
     fi
     
     # Update Python shebang to use detected Python
@@ -280,6 +299,8 @@ install_dev() {
     # Create symlinks
     ln -sf "$(pwd)/bin/tm-monitor" "$BINDIR/tm-monitor"
     ln -sf "$(pwd)/bin/tm-monitor-resources" "$BINDIR/tm-monitor-resources"
+    ln -sf "$(pwd)/bin/tm-monitor-stats" "$BINDIR/tm-monitor-stats"
+    ln -sf "$(pwd)/bin/tm-dashboard" "$BINDIR/tm-dashboard"
     ln -sf "$(pwd)/bin/tm-monitor-helper.py" "$LIBDIR/tm-monitor-helper.py"
     
     for file in lib/*.sh; do
@@ -305,10 +326,10 @@ uninstall() {
     
     # Remove files
     if [[ "$INSTALL_MODE" == "system" ]]; then
-        sudo rm -f "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources"
+        sudo rm -f "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources" "$BINDIR/tm-monitor-stats" "$BINDIR/tm-dashboard"
         sudo rm -rf "$LIBDIR"
     else
-        rm -f "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources"
+        rm -f "$BINDIR/tm-monitor" "$BINDIR/tm-monitor-resources" "$BINDIR/tm-monitor-stats" "$BINDIR/tm-dashboard"
         rm -rf "$LIBDIR"
     fi
     
@@ -349,6 +370,7 @@ main() {
     local check_only=false
     local dev_mode=false
     local do_uninstall=false
+    local update_mode=false
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -363,6 +385,10 @@ main() {
                 ;;
             --dev)
                 dev_mode=true
+                shift
+                ;;
+            --update)
+                update_mode=true
                 shift
                 ;;
             --uninstall)
@@ -405,7 +431,15 @@ main() {
         install_dev
     else
         create_directories
-        install_files
+        install_files "$update_mode"
+    fi
+    
+    # Show update-specific message
+    if [[ "$update_mode" == true ]]; then
+        echo
+        success "Update installation complete!"
+        echo "Your configuration and data have been preserved."
+        echo
     fi
     
     check_path

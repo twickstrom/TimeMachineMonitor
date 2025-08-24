@@ -71,13 +71,17 @@ _generate_display_cache() {
     MIDDLE_BORDER=$(_generate_border "middle")
     BOTTOM_BORDER=$(_generate_border "bottom")
     ROW_FORMAT=$(_generate_row_format)
+    # Make sure nothing is output here
+    : # No-op command
 }
 
 # Generate border line
 _generate_border() {
     local type="$1"  # top, middle, or bottom
     local result=""
-    local i width total_width
+    local i
+    local width
+    local total_width
 
     if [[ ${#COLUMN_WIDTHS[@]} -gt 0 ]]; then
         for i in "${!COLUMN_WIDTHS[@]}"; do
@@ -120,7 +124,9 @@ _generate_border() {
 # Generate row format string
 _generate_row_format() {
     local fmt=""
-    local i width align
+    local i
+    local width
+    local align
 
     if [[ ${#COLUMN_WIDTHS[@]} -gt 0 ]]; then
         for i in "${!COLUMN_WIDTHS[@]}"; do
@@ -181,7 +187,7 @@ colorize() {
                 Copying) echo -e "${COLOR_BLUE}${value}${COLOR_RESET}" ;;
                 Thinning*|DeletingOldBackups) echo -e "${COLOR_YELLOW}${value}${COLOR_RESET}" ;;
                 Starting|Finishing) echo -e "${COLOR_GREEN}${value}${COLOR_RESET}" ;;
-                BackupNotRunning|Idle) echo -e "${COLOR_CYAN}${value}${COLOR_RESET}" ;;
+                BackupNotRunning|Idle|"Not Running") echo -e "${COLOR_CYAN}${value}${COLOR_RESET}" ;;
                 *) echo -e "${COLOR_CYAN}${value}${COLOR_RESET}" ;;
             esac
             ;;
@@ -201,7 +207,7 @@ get_status_indicator() {
         Copying|Starting) echo -n "$STATUS_ACTIVE " ;;
         DeletingOldBackups|Thinning*) echo -n "$STATUS_MAINTENANCE " ;;
         Mounting*|HealthCheck*) echo -n "$STATUS_SYSTEM " ;;
-        BackupNotRunning|Idle) echo -n "$STATUS_IDLE " ;;
+        BackupNotRunning|Idle|"Not Running") echo -n "$STATUS_IDLE " ;;
         *) echo -n "$STATUS_SYSTEM " ;;
     esac
 }
@@ -290,16 +296,76 @@ print_idle_row() {
     printf "$BOX_VERTICAL %10s $BOX_VERTICAL\n" "-"
 }
 
-# Clear current line
-clear_line() {
-    printf "\r\033[K"
+# Print "Not Running" row with message
+print_not_running_row() {
+    local timestamp="$(date '+%H:%M:%S')"
+    local phase="${TM_PHASE:-Not Running}"
+    # If phase is "Unknown", replace with "Not Running"
+    [[ "$phase" == "Unknown" ]] && phase="Not Running"
+    local colored_phase="$(get_status_indicator "$phase")$(colorize phase "$phase")"
+
+    # Handle the phase column specially with padding
+    printf "$BOX_VERTICAL "
+    printf "%-8s" "$timestamp"
+    printf " $BOX_VERTICAL "
+    
+    # Phase column needs special handling for colored text and emoji
+    # Reduce width by 1 to account for emoji taking 2 display columns
+    local phase_width=31  # Default if not set
+    if [[ ${#COLUMN_WIDTHS[@]} -gt 1 ]]; then
+        phase_width=$((${COLUMN_WIDTHS[1]} - 1))
+    fi
+    local padded_phase="$(format_colored_column "$colored_phase" "$phase_width" "left")"
+    printf "%s" "$padded_phase"
+    
+    # Rest of the columns with dashes
+    printf " $BOX_VERTICAL %12s " "-"
+    printf "$BOX_VERTICAL %9s " "-"
+    printf "$BOX_VERTICAL %24s " "-"
+    printf "$BOX_VERTICAL %10s " "-"
+    printf "$BOX_VERTICAL %24s " "-"
+    printf "$BOX_VERTICAL %10s " "-"
+    printf "$BOX_VERTICAL %10s $BOX_VERTICAL\n" "-"
 }
 
-# Move cursor up N lines
-cursor_up() {
-    local lines="${1:-1}"
-    printf "\033[${lines}A"
+# Print waiting message below table
+print_waiting_message() {
+    local seconds="${1:-2}"
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_CYAN}⏳ Checking Time Machine status again in ${seconds}s...${COLOR_RESET}\n"
 }
+
+# Print backup complete message
+print_backup_complete() {
+    printf "\n${COLOR_BOLD_GREEN}✅ Time Machine backup completed successfully${COLOR_RESET}\n"
+}
+
+# Print error and prepare for exit
+print_error_and_exit() {
+    local error_msg="$1"
+    
+    # Clear current line and print error
+    clear_line
+    printf "\n"
+    clear_line
+    printf "${COLOR_BOLD_RED}❌ Error: ${error_msg}${COLOR_RESET}\n"
+    clear_line
+    printf "\n"
+    
+    # Print suggestions based on error type
+    if echo "$error_msg" | grep -q "destination"; then
+        printf "${COLOR_YELLOW}💡 Tip: Check that your backup disk is connected and mounted${COLOR_RESET}\n"
+    elif echo "$error_msg" | grep -q "disabled"; then
+        printf "${COLOR_YELLOW}💡 Tip: Enable Time Machine in System Preferences > Time Machine${COLOR_RESET}\n"
+    fi
+    
+    return 1
+}
+
+# NOTE: Using terminal.sh functions for all cursor/clear operations
+# This maintains DRY principle - no duplicate implementations
 
 # Print backup metadata block
 print_backup_metadata() {
@@ -320,29 +386,16 @@ print_backup_metadata() {
     fi
 }
 
-# Print a section header with consistent formatting
-# Usage: print_section_header <title> [divider_char]
-print_section_header() {
-    local title="$1"
-    local divider_char="${2:--}"
-    local divider
-    
-    # Use centralized terminal function for divider if available
-    if [[ "$(type -t draw_horizontal_line)" == "function" ]]; then
-        divider=$(draw_horizontal_line "$divider_char" 76)
-    else
-        divider=$(printf '%.0s%s' {1..76} | sed "s/./$divider_char/g")
-    fi
-    
-    clear_line
-    printf "\n"
-    clear_line
-    printf "${COLOR_BOLD_CYAN}%s${COLOR_RESET}\n" "$title"
-    clear_line
-    echo "${divider}"
-}
+# NOTE: The 76-width specific functions (print_section_header, print_divider_76, print_line_76)
+# were removed as they're no longer used. tm-monitor-resources now uses inline printf
+# statements for better control over line-by-line updates without flickering.
+# If you need these functions, use this pattern directly:
+#   printf "\r%-76.76s\033[K\n" "$content"  # For content lines
+#   printf "\r%-.76s\033[K\n" "${DIVIDER}"   # For divider lines
 
 # Export functions
 export -f init_display print_header print_footer
 export -f print_data_row print_idle_row colorize get_status_indicator
-export -f print_backup_metadata print_section_header
+export -f print_backup_metadata
+export -f print_not_running_row print_waiting_message print_backup_complete
+export -f print_error_and_exit

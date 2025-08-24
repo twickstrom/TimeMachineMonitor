@@ -170,19 +170,20 @@ is_backup_running() {
 
 # Cache speed/ETA for display continuity
 cache_dynamic_values() {
-    # Cache speed if valid
+    # Only cache speed if we have a valid current value
+    # Don't use old cached values if phase changed or if too much time passed
     if [[ "$CURRENT_SPEED" != "-" ]]; then
         PREV_SPEED="$CURRENT_SPEED"
-    elif [[ "$PREV_SPEED" != "-" ]]; then
-        # Use cached value
+    elif [[ "$PREV_SPEED" != "-" ]] && [[ "$CURRENT_PHASE" == "$PREV_PHASE" ]]; then
+        # Only use cached value if we're in the same phase
+        # This prevents showing old speed when phase changes
         CURRENT_SPEED="$PREV_SPEED"
     fi
 
-    # Cache ETA if valid
+    # Same for ETA - only cache within same phase
     if [[ "$CURRENT_ETA" != "-" ]]; then
         PREV_ETA="$CURRENT_ETA"
-    elif [[ "$PREV_ETA" != "-" ]]; then
-        # Use cached value
+    elif [[ "$PREV_ETA" != "-" ]] && [[ "$CURRENT_PHASE" == "$PREV_PHASE" ]]; then
         CURRENT_ETA="$PREV_ETA"
     fi
 }
@@ -214,6 +215,36 @@ SUMMARY
 _update_inline() {
     local json_data="$1"
     
+    # Get current values from tmutil globals
+    local current_bytes="${TM_BYTES:-0}"
+    local current_files="${TM_FILES:-0}"
+    local current_time=$(date +%s)
+    
+    # Calculate speed if we have previous values
+    local speed="-"
+    local files_per_sec="-"
+    local bytes_per_sec=0
+    
+    if [[ -n "$PREV_TIMESTAMP" ]] && [[ "$PREV_TIMESTAMP" != "0" ]]; then
+        local delta_time=$((current_time - PREV_TIMESTAMP))
+        if [[ $delta_time -gt 0 ]]; then
+            # Calculate speed
+            local delta_bytes=$((current_bytes - PREV_BYTES))
+            if [[ $delta_bytes -ge 0 ]]; then
+                bytes_per_sec=$((delta_bytes / delta_time))
+                local mbps=$(echo "scale=2; $bytes_per_sec / 1000000" | bc 2>/dev/null || echo "0")
+                speed="${mbps} MB/s"
+            fi
+            
+            # Calculate files/s
+            local delta_files=$((current_files - PREV_FILES))
+            if [[ $delta_files -ge 0 ]]; then
+                local files_rate=$(echo "scale=2; $delta_files / $delta_time" | bc 2>/dev/null || echo "0")
+                files_per_sec="${files_rate}/s"
+            fi
+        fi
+    fi
+    
     # Parse JSON using Python inline
     local parsed
     parsed=$(echo "$json_data" | python3 -c '
@@ -231,9 +262,9 @@ try:
         str(progress.get("files", 0)),  # files
         str(progress.get("totalBytes", 0)),  # total bytes
         str(progress.get("Percent", 0)),  # percent
-        "-",  # speed
-        "-",  # files per sec
-        "0",  # bytes per sec
+        "SPEED_PLACEHOLDER",  # speed - will be replaced
+        "FILES_PLACEHOLDER",  # files per sec - will be replaced
+        "BYTES_PLACEHOLDER",  # bytes per sec - will be replaced
         "-",  # copied batch
         "-",  # pct batch
         "-",  # copied total
@@ -247,6 +278,7 @@ try:
         bytes_val = int(progress.get("bytes", 0))
         total = int(progress.get("totalBytes", 0))
         
+        # Always recalculate batch total
         batch_total = bytes_val / percent
         gb_copied = bytes_val / (1000**3)
         gb_batch = batch_total / (1000**3)
@@ -267,6 +299,11 @@ except Exception as e:
 ' 2>/dev/null)
     
     if [[ -n "$parsed" ]]; then
+        # Replace placeholders with calculated values
+        parsed="${parsed//SPEED_PLACEHOLDER/$speed}"
+        parsed="${parsed//FILES_PLACEHOLDER/$files_per_sec}"
+        parsed="${parsed//BYTES_PLACEHOLDER/$bytes_per_sec}"
+        
         _parse_helper_response "$parsed"
     else
         debug "Failed to parse JSON inline"

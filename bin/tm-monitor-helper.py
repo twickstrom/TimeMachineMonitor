@@ -33,9 +33,6 @@ class TMMonitorHelper:
         self.is_initial_backup: bool = False  # Will be set from tmutil data
         self.prev_phase: str = ""  # Track phase changes
         
-        # Stable batch total for consistency
-        self.stable_batch_total: float = 0.0
-        
         # Set up signal handlers
         signal.signal(signal.SIGTERM, self.handle_signal)
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -87,8 +84,8 @@ class TMMonitorHelper:
                 # Add to ETA buffer
                 self.eta_buffer.append((current_time, eta_seconds))
                 
-                # Clean old entries from buffer
-                cutoff_time: int = current_time - self.buffer_window
+                # Clean old entries from buffer (keep only last 10 seconds for responsive ETA)
+                cutoff_time: int = current_time - min(10, self.buffer_window)
                 self.eta_buffer = [(t, e) for t, e in self.eta_buffer if t >= cutoff_time]
                 
                 # Calculate weighted average ETA from buffer
@@ -170,30 +167,39 @@ class TMMonitorHelper:
             bytes_per_sec: int = 0
             
             # Calculate smoothed speed using buffer window
+            # Use a shorter window for more responsive updates (5 seconds min)
+            min_buffer_size = min(5, self.buffer_window // 6)  # At least 5 samples or 1/6 of window
             if len(self.speed_buffer) >= 2:
-                # Get oldest and newest samples in buffer
-                oldest_time, oldest_bytes = self.speed_buffer[0]
-                newest_time, newest_bytes = self.speed_buffer[-1]
+                # Use recent samples for speed calculation (last 5-10 seconds)
+                recent_samples = self.speed_buffer[-min(10, len(self.speed_buffer)):]
                 
-                delta_time: int = newest_time - oldest_time
-                delta_bytes: int = newest_bytes - oldest_bytes
-                
-                if delta_time > 0 and delta_bytes >= 0:
-                    bytes_per_sec = delta_bytes // delta_time
-                    speed = self.calculate_speed(delta_bytes, delta_time)
+                if len(recent_samples) >= 2:
+                    oldest_time, oldest_bytes = recent_samples[0]
+                    newest_time, newest_bytes = recent_samples[-1]
+                    
+                    delta_time: int = newest_time - oldest_time
+                    delta_bytes: int = newest_bytes - oldest_bytes
+                    
+                    if delta_time > 0 and delta_bytes >= 0:
+                        bytes_per_sec = delta_bytes // delta_time
+                        speed = self.calculate_speed(delta_bytes, delta_time)
             
             # Calculate smoothed files/s using buffer window
+            # Use recent samples for more responsive updates
             if len(self.files_buffer) >= 2:
-                # Get oldest and newest samples in files buffer
-                oldest_time_f, oldest_files = self.files_buffer[0]
-                newest_time_f, newest_files = self.files_buffer[-1]
+                # Use recent samples (last 5-10 seconds)
+                recent_files = self.files_buffer[-min(10, len(self.files_buffer)):]
                 
-                delta_time_f: int = newest_time_f - oldest_time_f
-                delta_files: int = newest_files - oldest_files
-                
-                if delta_time_f > 0 and delta_files >= 0:
-                    files_rate: float = delta_files / delta_time_f
-                    files_per_sec = f'{files_rate:.2f}/s'
+                if len(recent_files) >= 2:
+                    oldest_time_f, oldest_files = recent_files[0]
+                    newest_time_f, newest_files = recent_files[-1]
+                    
+                    delta_time_f: int = newest_time_f - oldest_time_f
+                    delta_files: int = newest_files - oldest_files
+                    
+                    if delta_time_f > 0 and delta_files >= 0:
+                        files_rate: float = delta_files / delta_time_f
+                        files_per_sec = f'{files_rate:.2f}/s'
             
             # Initialize batch and total metrics
             copied_batch: str = '-'
@@ -218,14 +224,9 @@ class TMMonitorHelper:
             elif 0 < percent <= 1 and bytes_val > 0 and total_bytes > 0:
                 # Normal copying phase calculations
                 try:
-                    batch_total: float = bytes_val / percent
-                    
-                    # Stabilize batch total to prevent jumping
-                    if (not self.stable_batch_total or 
-                        abs(batch_total - self.stable_batch_total) > (1 * self.units ** 3)):
-                        self.stable_batch_total = batch_total
-                    else:
-                        batch_total = self.stable_batch_total
+                    # Always recalculate batch total based on current percent
+                    # This is the estimated total size of the current batch
+                    batch_total: float = bytes_val / percent if percent > 0 else 0
                     
                     gb_copied: float = bytes_val / (self.units ** 3)
                     gb_batch: float = batch_total / (self.units ** 3)

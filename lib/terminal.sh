@@ -241,7 +241,7 @@ fit_to_width() {
 draw_horizontal_line() {
     local char="${1:--}"
     local width="${2:-$(get_terminal_width)}"
-    printf '%*s\n' "$width" '' | tr ' ' "$char"
+    printf '%*s' "$width" '' | tr ' ' "$char"
 }
 
 # Center text in terminal
@@ -262,6 +262,32 @@ center_text() {
     fi
 }
 
+# Set scroll region to exclude footer (last N lines)
+set_scroll_region() {
+    local footer_lines="${1:-1}"
+    local total_lines
+    total_lines=$(tput lines 2>/dev/null || echo 24)
+    local scroll_end=$((total_lines - footer_lines))
+    
+    # Set scrolling region from line 1 to scroll_end
+    printf "\033[1;${scroll_end}r"
+}
+
+# Reset scroll region to full screen
+reset_scroll_region() {
+    printf "\033[r"
+}
+
+# Position cursor at specific line from bottom
+position_at_bottom_line() {
+    local lines_from_bottom="${1:-0}"
+    local total_lines
+    total_lines=$(tput lines 2>/dev/null || echo 24)
+    local target_line=$((total_lines - lines_from_bottom))
+    
+    tput cup "$target_line" 0
+}
+
 # Legacy compatibility - map old function names to new ones
 detect_terminal_width() { get_terminal_width; }
 check_terminal_size() { check_terminal_minimum "$@"; }
@@ -277,4 +303,5 @@ export -f enter_alternate_buffer exit_alternate_buffer
 export -f setup_terminal_monitoring cleanup_terminal_monitoring
 export -f is_terminal is_interactive get_terminal_type supports_colors
 export -f fit_to_width draw_horizontal_line center_text
+export -f set_scroll_region reset_scroll_region position_at_bottom_line
 export -f detect_terminal_width check_terminal_size  # Legacy compatibility

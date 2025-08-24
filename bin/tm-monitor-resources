@@ -21,23 +21,20 @@ readonly COL_CMD=29      # COMMAND column
 
 # Minimum terminal size
 readonly MIN_COLS=76
-readonly MIN_ROWS=40
+readonly MIN_ROWS=42  # Prevents header duplication with 5+ processes
 
-# Cache for system info (these don't change during execution)
-CACHED_CPU_CORES=""
-CACHED_TOTAL_MEM_GB=""
+# Fixed width divider constant (for backward compatibility)
+readonly DIVIDER="----------------------------------------------------------------------------"
 
-# Get cached CPU cores
-get_cpu_cores_cached() {
-    [[ -z "$CACHED_CPU_CORES" ]] && CACHED_CPU_CORES=$(get_cpu_cores)
-    echo "$CACHED_CPU_CORES"
-}
-
-# Get cached total memory
-get_total_memory_gb_cached() {
-    [[ -z "$CACHED_TOTAL_MEM_GB" ]] && CACHED_TOTAL_MEM_GB=$(get_total_memory_gb)
-    echo "$CACHED_TOTAL_MEM_GB"
-}
+# Content row counts for display calculation
+readonly HEADER_ROWS=2           # Title + divider
+readonly PROCESS_TABLE_ROWS=10   # Header(2) + up to 5 processes + divider + total + buffer
+readonly IMPACT_ROWS=4           # Section header + 3 lines
+readonly LOAD_ROWS=4             # Section header + 2 lines
+readonly TM_STATUS_ROWS=8        # Section header + up to 6 lines
+readonly SESSION_STATS_ROWS=7    # Section header + 5 lines + divider
+readonly FOOTER_ROWS=1           # Footer message only (no blank line)
+readonly TOTAL_CONTENT_ROWS=42   # Total rows needed for full display
 
 # Show usage
 usage() {
@@ -83,25 +80,40 @@ EOF
     exit 0
 }
 
-# Display resource information - now using library functions
+# Display resource information - optimized for minimal repainting
 display_resources() {
-    # Move to home position (we're in alternate buffer)
-    cursor_home
+    # Get current terminal size
+    local term_rows term_cols
+    local size
+    size=$(get_terminal_size)
+    term_rows="${size%% *}"
+    term_cols="${size#* }"
     
-    # Check terminal size using centralized function
-    if ! check_terminal_minimum $MIN_ROWS $MIN_COLS; then
-        print_terminal_warning $MIN_ROWS $MIN_COLS
+    # Check if terminal is large enough for all content
+    if [[ "$term_rows" -lt "$TOTAL_CONTENT_ROWS" ]] || [[ "$term_cols" -lt "$MIN_COLS" ]]; then
+        # Show warning at current position
+        cursor_home
+        clear_from_cursor
+        printf "${COLOR_BOLD_YELLOW}⚠ Terminal too small!${COLOR_RESET}\n"
+        printf "Current size: ${term_cols}x${term_rows}\n"
+        printf "Required size: ${MIN_COLS}x${TOTAL_CONTENT_ROWS}\n"
+        printf "\nPlease resize your terminal window.\n"
         return 1
     fi
     
-    # Header using centralized formatting
-    local DIVIDER
-    DIVIDER=$(draw_horizontal_line "-" 76)
+    # Move to home position - we'll update line by line
+    cursor_home
     
-    clear_line
-    printf "${COLOR_BOLD_BLUE}%s${COLOR_RESET}\n" "TM-Monitor Resource Usage - $(format_timestamp "" "%Y-%m-%d %H:%M:%S")"
-    clear_line
-    echo "${DIVIDER}"
+    # Title - exactly 76 chars wide (with line clear to handle any residual text)
+    local timestamp
+    timestamp=$(format_timestamp "" "%Y-%m-%d %H:%M:%S")
+    local title="TM-Monitor Resource Usage - ${timestamp}"
+    # Truncate title if too long
+    if [[ ${#title} -gt 76 ]]; then
+        title="${title:0:73}..."
+    fi
+    printf "\r${COLOR_BOLD_BLUE}%-76s${COLOR_RESET}\033[K\n" "$title"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # Find processes using centralized functions
     local monitor_procs helper_procs backupd_procs backupd_helper_procs
@@ -110,18 +122,38 @@ display_resources() {
     backupd_procs=$(find_backupd_processes)
     backupd_helper_procs=$(find_backupd_helper_processes)
     
-    # Process table header
-    clear_line
-    printf "%-6s%8s %8s %8s    %-10s %-29s\n" \
-           "PID" "CPU%" "MEM%" "RSS(MB)" "TIME" "COMMAND"
-    clear_line
-    echo "${DIVIDER}"
+    # Process table header - exactly 76 chars with line clearing
+    printf "\r%-76.76s\033[K\n" "$(printf "%-6s%8s %8s %8s    %-10s %-29s" "PID" "CPU%" "MEM%" "RSS(MB)" "TIME" "COMMAND")"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # Display processes using centralized function
+    # Track lines used to ensure consistent spacing
+    local process_lines=0
+    
+    # Count actual lines that will be displayed
+    [[ -n "$monitor_procs" ]] && process_lines=$((process_lines + $(echo "$monitor_procs" | wc -l)))
+    [[ -z "$monitor_procs" ]] && ((process_lines++))
+    
+    [[ -n "$helper_procs" ]] && process_lines=$((process_lines + $(echo "$helper_procs" | wc -l)))
+    [[ -z "$helper_procs" ]] && ((process_lines++))
+    
+    [[ -n "$backupd_procs" ]] && process_lines=$((process_lines + $(echo "$backupd_procs" | wc -l)))
+    [[ -z "$backupd_procs" ]] && ((process_lines++))
+    
+    [[ -n "$backupd_helper_procs" ]] && process_lines=$((process_lines + $(echo "$backupd_helper_procs" | wc -l)))
+    [[ -z "$backupd_helper_procs" ]] && ((process_lines++))
+    
+    # Display the processes
     display_processes_or_placeholder "$monitor_procs" "tm-monitor" "false" "$USE_COLORS"
     display_processes_or_placeholder "$helper_procs" "tm-monitor-helper" "true" "$USE_COLORS"
     display_processes_or_placeholder "$backupd_procs" "Time Machine (backupd)" "true" "$USE_COLORS"
     display_processes_or_placeholder "$backupd_helper_procs" "Time Machine (backupd-helper)" "true" "$USE_COLORS"
+    
+    # Pad to ensure we always use 5 lines for processes (allowing for one extra spawned process)
+    while [[ $process_lines -lt 5 ]]; do
+        printf "\r%76s\033[K\n" " "
+        ((process_lines++))
+    done
     
     # Calculate totals using centralized function
     local all_procs total_cpu=0 total_mem=0 total_rss=0 process_count=0
@@ -138,16 +170,14 @@ display_resources() {
         IFS='|' read -r total_cpu total_mem total_rss process_count <<< "$totals"
     fi
     
-    clear_line
-    echo "${DIVIDER}"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # Format totals using centralized formatting
     total_cpu=$(format_decimal "$total_cpu" 2 "0.00")
     total_mem=$(format_decimal "$total_mem" 2 "0.00")
     total_rss=$(format_decimal "$total_rss" 2 "0.00")
     
-    clear_line
-    printf "%-6s%8s %8s %8s\n" "TOTAL" "${total_cpu}" "${total_mem}" "${total_rss}"
+    printf "\r%-76.76s\033[K\n" "$(printf "%-6s%8s %8s %8s" "TOTAL" "${total_cpu}" "${total_mem}" "${total_rss}")"
     
     # Impact Assessment using centralized functions
     display_impact_assessment "$total_cpu" "$total_mem" "$total_rss"
@@ -160,12 +190,6 @@ display_resources() {
     
     # Session Statistics using state.sh functions
     display_session_stats
-    
-    # Footer
-    clear_line
-    printf "\n"
-    clear_line
-    printf "Press Ctrl+C to exit (updating every ${INTERVAL}s)\n"
 }
 
 # Display impact assessment section
@@ -175,26 +199,24 @@ display_impact_assessment() {
     local total_rss="$3"
     
     local num_cores total_mem_gb
-    num_cores=$(get_cpu_cores_cached)
-    total_mem_gb=$(get_total_memory_gb_cached)
+    num_cores=$(get_cpu_cores)
+    total_mem_gb=$(get_total_memory_gb)
     
-    print_section_header "Impact Assessment"
+    # Section header with line-by-line updates
+    printf "\n\r${COLOR_BOLD_CYAN}%-76.76s${COLOR_RESET}\033[K\n" "Impact Assessment"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # CPU impact
     local cpu_impact cpu_level cpu_color
     cpu_impact=$(get_impact_level "$total_cpu" "2" "5")
     IFS='|' read -r cpu_level cpu_color <<< "$cpu_impact"
-    clear_line
-    printf "%-20s: ${cpu_color}%-8s${COLOR_RESET} %s%% of %d cores\n" \
-           "CPU Usage" "$cpu_level" "$(format_percentage "$total_cpu" false "0.00")" "$num_cores"
+    printf "\r%-20s: ${cpu_color}%-8s${COLOR_RESET} %s%% of %d cores\033[K\n" "CPU Usage" "$cpu_level" "$(format_percentage "$total_cpu" false "0.00")" "$num_cores"
     
     # Memory percentage impact
     local mem_pct_impact mem_pct_level mem_pct_color
     mem_pct_impact=$(get_impact_level "$total_mem" "1.0" "5.0")
     IFS='|' read -r mem_pct_level mem_pct_color <<< "$mem_pct_impact"
-    clear_line
-    printf "%-20s: ${mem_pct_color}%-8s${COLOR_RESET} %s%% of system RAM\n" \
-           "Memory Percentage" "$mem_pct_level" "$(format_percentage "$total_mem" false "0.00")"
+    printf "\r%-20s: ${mem_pct_color}%-8s${COLOR_RESET} %s%% of system RAM\033[K\n" "Memory Percentage" "$mem_pct_level" "$(format_percentage "$total_mem" false "0.00")"
     
     # Memory RSS impact - dynamic thresholds
     local total_mem_mb rss_low_threshold rss_high_threshold
@@ -213,17 +235,17 @@ display_impact_assessment() {
     rss_pct=$(echo "scale=3; $total_rss / $total_mem_mb * 100" | bc -l 2>/dev/null)
     rss_pct=$(format_percentage "$rss_pct" false "0.00")
     
-    clear_line
-    printf "%-20s: ${mem_rss_color}%-8s${COLOR_RESET} %s MB (%s%% of %.1f GB)\n" \
-           "Memory Size (RSS)" "$mem_rss_level" "$total_rss" "$rss_pct" "$total_mem_gb"
+    printf "\r%-20s: ${mem_rss_color}%-8s${COLOR_RESET} %s MB (%s%% of %.1f GB)\033[K\n" "Memory Size (RSS)" "$mem_rss_level" "$total_rss" "$rss_pct" "$total_mem_gb"
 }
 
 # Display system load section
 display_system_load() {
     local num_cores
-    num_cores=$(get_cpu_cores_cached)
+    num_cores=$(get_cpu_cores)
     
-    print_section_header "System Load"
+    # Section header with line-by-line updates
+    printf "\n\r${COLOR_BOLD_CYAN}%-76.76s${COLOR_RESET}\033[K\n" "System Load"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # Get load averages using centralized function
     local load1 load5 load15
@@ -241,9 +263,7 @@ display_system_load() {
     formatted_load5=$(format_decimal "$load5" 2 "0.00")
     formatted_load15=$(format_decimal "$load15" 2 "0.00")
     
-    clear_line
-    printf "%-20s: ${load1_color}%s${COLOR_RESET} 1m   ${load5_color}%s${COLOR_RESET} 5m   ${load15_color}%s${COLOR_RESET} 15m\n" \
-           "Load Averages" "$formatted_load1" "$formatted_load5" "$formatted_load15"
+    printf "\r%-20s: ${load1_color}%s${COLOR_RESET} 1m   ${load5_color}%s${COLOR_RESET} 5m   ${load15_color}%s${COLOR_RESET} 15m\033[K\n" "Load Averages" "$formatted_load1" "$formatted_load5" "$formatted_load15"
     
     # Status using centralized function
     local load_status load_color
@@ -255,14 +275,14 @@ display_system_load() {
         *) load_color="$COLOR_RESET" ;;
     esac
     
-    clear_line
-    printf "%-20s: ${load_color}%s${COLOR_RESET} (%s / %d cores)\n" \
-           "Status" "$load_status" "$(format_decimal "$load1" 2 "0.00")" "$num_cores"
+    printf "\r%-20s: ${load_color}%s${COLOR_RESET} (%s / %d cores)\033[K\n" "Status" "$load_status" "$(format_decimal "$load1" 2 "0.00")" "$num_cores"
 }
 
 # Display Time Machine status - now using centralized tmutil functions
 display_tm_status() {
-    print_section_header "Time Machine Status"
+    # Section header with line-by-line updates
+    printf "\n\r${COLOR_BOLD_CYAN}%-76.76s${COLOR_RESET}\033[K\n" "Time Machine Status"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # Use centralized tmutil function directly
     local tm_status status phase percent size_gb total_gb
@@ -281,8 +301,7 @@ display_tm_status() {
         update_state "$(get_tmutil_json 2>/dev/null)" 2>/dev/null || true
     fi
     
-    clear_line
-    printf "%-20s: " "Status"
+    printf "\r%-20s: " "Status"
     
     # Color the status
     local status_color
@@ -292,41 +311,36 @@ display_tm_status() {
         "Not Running") status_color="$COLOR_BOLD_YELLOW" ;;
         *) status_color="$COLOR_CYAN" ;;
     esac
-    printf "${status_color}%s${COLOR_RESET}\n" "$status"
+    printf "${status_color}%s${COLOR_RESET}\033[K\n" "$status"
     
     if [[ "$status" == "Running" ]] || [[ "$status" == "Stopping" ]]; then
-        clear_line
-        printf "%-20s: %s\n" "Phase" "$phase"
-        clear_line
-        printf "%-20s: %s\n" "Progress" "$(format_percentage "$percent" true "0.00")"
-        clear_line
-        printf "%-20s: %s GB (current batch)\n" "Data Copied" "$(format_decimal "$size_gb" 2 "0.00")"
-        clear_line
-        printf "%-20s: %s GB (sparsebundle)\n" "Estimated Size" "$(format_decimal "$total_gb" 2 "0.00")"
+        printf "\r%-20s: %s\033[K\n" "Phase" "$phase"
+        printf "\r%-20s: %s\033[K\n" "Progress" "$(format_percentage "$percent" true "0.00")"
+        printf "\r%-20s: %s GB (current batch)\033[K\n" "Data Copied" "$(format_decimal "$size_gb" 2 "0.00")"
+        printf "\r%-20s: %s GB (sparsebundle)\033[K\n" "Estimated Size" "$(format_decimal "$total_gb" 2 "0.00")"
         
         # Add ETA if available
         if [[ "${TM_TIME_REMAINING:-0}" -gt 0 ]]; then
-            clear_line
-            printf "%-20s: %s\n" "ETA" "$(format_eta "$TM_TIME_REMAINING")"
+            printf "\r%-20s: %s\033[K\n" "ETA" "$(format_eta "$TM_TIME_REMAINING")"
         fi
         
         # Show changed items if in preparation
         if [[ "${TM_PHASE:-}" == "Starting" ]] && [[ "${TM_NUMBER_OF_CHANGED_ITEMS:-0}" -gt 0 ]]; then
-            clear_line
-            printf "%-20s: %s\n" "Items Found" "$TM_NUMBER_OF_CHANGED_ITEMS"
+            printf "\r%-20s: %s\033[K\n" "Items Found" "$TM_NUMBER_OF_CHANGED_ITEMS"
         fi
     else
         # Placeholder fields
         for field in "Phase" "Progress" "Data Copied" "Estimated Size"; do
-            clear_line
-            printf "%-20s: -\n" "$field"
+            printf "\r%-20s: -\033[K\n" "$field"
         done
     fi
 }
 
 # Display session statistics using state.sh functions
 display_session_stats() {
-    print_section_header "Session Statistics"
+    # Section header with line-by-line updates
+    printf "\n\r${COLOR_BOLD_CYAN}%-76.76s${COLOR_RESET}\033[K\n" "Session Statistics"
+    printf "\r%-.76s\033[K\n" "${DIVIDER}"
     
     # Update sample count
     ((SESSION_SAMPLE_COUNT++))
@@ -337,22 +351,17 @@ display_session_stats() {
     avg_speed_mb=$(format_speed_mbps "$avg_speed_bytes")
     session_duration=$(get_session_duration)
     
-    clear_line
-    printf "%-20s: %s\n" "Duration" "$(format_duration "$session_duration" "AUTO")"
-    clear_line
-    printf "%-20s: %s\n" "Samples" "$(format_integer "$SESSION_SAMPLE_COUNT" false "0")"
-    clear_line
-    printf "%-20s: %s\n" "Average Speed" "$avg_speed_mb"
-    clear_line
-    printf "%-20s: %s\n" "Speed Samples" "$(format_integer "${#SPEED_SAMPLES[@]}" false "0")"
-    clear_line
-    printf "%-20s: %s\n" "Failures" "$(format_integer "$SESSION_FAILURE_COUNT" false "0")"
+    printf "\r%-20s: %s\033[K\n" "Duration" "$(format_duration "$session_duration" "AUTO")"
+    printf "\r%-20s: %s\033[K\n" "Samples" "$(format_integer "$SESSION_SAMPLE_COUNT" false "0")"
+    printf "\r%-20s: %s\033[K\n" "Average Speed" "$avg_speed_mb"
+    printf "\r%-20s: %s\033[K\n" "Speed Samples" "$(format_integer "${#SPEED_SAMPLES[@]}" false "0")"
+    printf "\r%-20s: %s\033[K\n" "Failures" "$(format_integer "$SESSION_FAILURE_COUNT" false "0")"
 }
 
 # Handle interrupt signal gracefully
 handle_interrupt() {
+    reset_scroll_region
     cleanup_terminal_monitoring
-    clear_line
     echo
     echo "Monitoring stopped."
     echo
@@ -374,11 +383,70 @@ main() {
         
         # Set up signal handlers
         trap 'handle_interrupt' INT TERM
-        trap 'cleanup_terminal_monitoring' EXIT
+        trap 'cleanup_terminal_monitoring; reset_scroll_region' EXIT
+        
+        # Initial setup
+        local first_draw=true
+        local last_term_rows=0
+        local last_term_cols=0
         
         # Main loop
         while true; do
-            display_resources
+            # Get current terminal size
+            local term_rows term_cols
+            local size
+            size=$(get_terminal_size "true")  # Force refresh
+            term_rows="${size%% *}"
+            term_cols="${size#* }"
+            
+            # Detect terminal size change
+            if [[ "$term_rows" != "$last_term_rows" ]] || [[ "$term_cols" != "$last_term_cols" ]]; then
+                # Terminal size changed - need full redraw
+                reset_scroll_region
+                clear_screen
+                first_draw=true
+                last_term_rows="$term_rows"
+                last_term_cols="$term_cols"
+            fi
+            
+            # Check if terminal is large enough
+            if [[ "$term_rows" -lt "$TOTAL_CONTENT_ROWS" ]] || [[ "$term_cols" -lt "$MIN_COLS" ]]; then
+                # Terminal too small - show warning and footer
+                cursor_home
+                display_resources
+                
+                # Position footer at bottom of actual terminal
+                if [[ "$term_rows" -ge 6 ]]; then
+                    printf "\033[%d;1H" "$term_rows"  # Move to last line
+                    clear_line
+                    printf "${COLOR_DIM}Press Ctrl+C to exit (updating every ${INTERVAL}s)${COLOR_RESET}"
+                fi
+            else
+                # Terminal is large enough
+                if [[ "$first_draw" == "true" ]]; then
+                    # First draw - set up display area
+                    clear_screen
+                    
+                    # Set scroll region to exclude footer line
+                    printf "\033[1;%dr" $((term_rows - 1))
+                    
+                    # Draw footer at the bottom (outside scroll region)
+                    printf "\033[%d;1H" "$term_rows"  # Move to last line
+                    clear_line
+                    printf "${COLOR_DIM}Press Ctrl+C to exit (updating every ${INTERVAL}s)${COLOR_RESET}"
+                    
+                    # Draw initial content
+                    cursor_home
+                    display_resources
+                    
+                    first_draw=false
+                else
+                    # Subsequent updates - just move cursor and update
+                    cursor_home
+                    display_resources
+                fi
+            fi
+            
             sleep "$INTERVAL"
         done
     else

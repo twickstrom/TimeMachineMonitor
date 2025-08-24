@@ -64,6 +64,14 @@ error() {
     fi
 }
 
+success() {
+    if [[ "${SHOW_COLORS:-false}" == "true" ]]; then
+        echo -e "${COLOR_GREEN}✓ $*${COLOR_RESET}" >&2
+    else
+        echo "✓ $*" >&2
+    fi
+}
+
 fatal() {
     if [[ "${SHOW_COLORS:-false}" == "true" ]]; then
         echo -e "${COLOR_RED}FATAL: $*${COLOR_RESET}" >&2
@@ -99,4 +107,4 @@ log_csv() {
 }
 
 # Export functions
-export -f debug info warn error fatal init_logging log_csv
+export -f debug info warn error success fatal init_logging log_csv

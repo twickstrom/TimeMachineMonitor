@@ -63,7 +63,9 @@ _parse_config_file() {
         
         # Validate key names (security)
         case "$key" in
-            INTERVAL|UNITS|SHOW_COLORS|SHOW_SUMMARY|DEBUG|CSV_LOG|MAX_FAILURES)
+            INTERVAL|UNITS|SHOW_COLORS|SHOW_SUMMARY|DEBUG|CSV_LOG|MAX_FAILURES|\
+            UPDATE_CHECK_ENABLED|UPDATE_CHECK_INTERVAL|UPDATE_CHECK_CHANNEL|\
+            UPDATE_NOTIFICATION_STYLE|UPDATE_AUTO_INSTALL|GITHUB_REPO)
                 # Validate value format
                 if [[ ! "$value" =~ ^[a-zA-Z0-9_./\-]+$ ]]; then
                     warn "Invalid characters in config value for $key: $value"
@@ -79,6 +81,12 @@ _parse_config_file() {
                     DEBUG) DEBUG="$value" ;;
                     CSV_LOG) CSV_LOG="$value" ;;
                     MAX_FAILURES) MAX_FAILURES="$value" ;;
+                    UPDATE_CHECK_ENABLED) export UPDATE_CHECK_ENABLED="$value" ;;
+                    UPDATE_CHECK_INTERVAL) export UPDATE_CHECK_INTERVAL="$value" ;;
+                    UPDATE_CHECK_CHANNEL) export UPDATE_CHECK_CHANNEL="$value" ;;
+                    UPDATE_NOTIFICATION_STYLE) export UPDATE_NOTIFICATION_STYLE="$value" ;;
+                    UPDATE_AUTO_INSTALL) export UPDATE_AUTO_INSTALL="$value" ;;
+                    GITHUB_REPO) export GITHUB_REPO="$value" ;;
                 esac
                 debug "Config: $key = $value"
                 ;;

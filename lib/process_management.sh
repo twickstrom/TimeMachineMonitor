@@ -191,12 +191,10 @@ format_process_row() {
     if [[ "$pid" == "-" ]]; then
         # Show dashes for inactive processes (dimmed if colors enabled)
         if [[ "$use_colors" == "true" ]]; then
-            clear_line
-            printf "${COLOR_DIM}%-6s%8s %8s %8s    %-10s %-29.29s${COLOR_RESET}\n" \
+            printf "\r${COLOR_DIM}%-6s%8s %8s %8s    %-10s %-29.29s${COLOR_RESET}\033[K\n" \
                    "-" "-" "-" "-" "-" "${cmd:0:29}"
         else
-            clear_line
-            printf "%-6s%8s %8s %8s    %-10s %-29.29s\n" \
+            printf "\r%-6s%8s %8s %8s    %-10s %-29.29s\033[K\n" \
                    "-" "-" "-" "-" "-" "${cmd:0:29}"
         fi
     else
@@ -207,8 +205,7 @@ format_process_row() {
         formatted_rss=$(format_decimal "$rss" 2 "0.00")
         
         # Normal process row with values
-        clear_line
-        printf "${color}%-6s%8s %8s %8s    %-10s %-29.29s${COLOR_RESET}\n" \
+        printf "\r${color}%-6s%8s %8s %8s    %-10s %-29.29s${COLOR_RESET}\033[K\n" \
                "${pid:0:6}" "$formatted_cpu" "$formatted_mem" "$formatted_rss" "${time:0:10}" "${cmd:0:29}"
     fi
 }

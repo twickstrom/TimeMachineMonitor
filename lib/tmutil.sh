@@ -1,18 +1,26 @@
 #!/usr/bin/env bash
-# lib/tmutil.sh - Centralized tmutil status parsing for tm-monitor
-# Refactored to avoid eval and use only macOS 14.x+ built-in tools
+# lib/tmutil.sh - Enhanced centralized tmutil status parsing with improved caching
+# Version: 2.0.0
 
 # Source dependencies
 [[ -z "${DEFAULT_INTERVAL:-}" ]] && source "$(dirname "${BASH_SOURCE[0]}")/constants.sh"
 [[ -z "$(type -t debug)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
 [[ -z "$(type -t format_decimal)" ]] && source "$(dirname "${BASH_SOURCE[0]}")/formatting.sh"
 
-# Cache for last tmutil status to avoid repeated calls
-TMUTIL_CACHE_TIME=0
-TMUTIL_CACHE_DATA=""
-TMUTIL_CACHE_TTL=1  # seconds
+# ============================================================================
+# SHARED CACHE IMPLEMENTATION
+# ============================================================================
 
-# Global variables to store parsed tmutil data (safer than eval)
+# Cache configuration
+TMUTIL_CACHE_TTL="${TMUTIL_CACHE_TTL:-2}"  # Increased from 1 to 2 seconds
+TMUTIL_CACHE_DIR="${TM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/tm-monitor}"
+TMUTIL_CACHE_FILE="$TMUTIL_CACHE_DIR/tmutil_status.cache"
+TMUTIL_CACHE_LOCK="$TMUTIL_CACHE_DIR/tmutil_status.lock"
+
+# Ensure cache directory exists
+[[ ! -d "$TMUTIL_CACHE_DIR" ]] && mkdir -p "$TMUTIL_CACHE_DIR"
+
+# Global variables to store parsed tmutil data
 TM_RUNNING=0
 TM_PHASE=""
 TM_BYTES=0
@@ -32,6 +40,89 @@ TM_ATTEMPT_OPTIONS=0
 TM_RAW_PERCENT=0
 TM_RAW_TOTAL_BYTES=0
 
+# Last update tracking
+TM_LAST_BYTES=0
+TM_LAST_UPDATE_TIME=0
+
+# ============================================================================
+# CACHE MANAGEMENT FUNCTIONS
+# ============================================================================
+
+# Acquire lock with timeout
+acquire_cache_lock() {
+    local timeout="${1:-5}"
+    local elapsed=0
+    
+    while [[ -f "$TMUTIL_CACHE_LOCK" ]] && [[ $elapsed -lt $timeout ]]; do
+        sleep 0.1
+        ((elapsed++))
+    done
+    
+    # Create lock file with our PID
+    echo $$ > "$TMUTIL_CACHE_LOCK"
+    return 0
+}
+
+# Release lock
+release_cache_lock() {
+    rm -f "$TMUTIL_CACHE_LOCK"
+}
+
+# Write to shared cache file
+write_cache() {
+    local json_data="$1"
+    local timestamp=$(date +%s)
+    
+    acquire_cache_lock
+    cat > "$TMUTIL_CACHE_FILE" <<EOF
+TIMESTAMP=$timestamp
+DATA_START
+$json_data
+DATA_END
+EOF
+    release_cache_lock
+}
+
+# Read from shared cache file
+read_cache() {
+    local current_time=$(date +%s)
+    
+    [[ ! -f "$TMUTIL_CACHE_FILE" ]] && return 1
+    
+    acquire_cache_lock
+    local cache_content
+    cache_content=$(cat "$TMUTIL_CACHE_FILE" 2>/dev/null)
+    release_cache_lock
+    
+    [[ -z "$cache_content" ]] && return 1
+    
+    # Extract timestamp
+    local cache_timestamp
+    cache_timestamp=$(echo "$cache_content" | grep "^TIMESTAMP=" | cut -d= -f2)
+    
+    [[ -z "$cache_timestamp" ]] && return 1
+    
+    # Check if cache is still valid
+    local age=$((current_time - cache_timestamp))
+    if [[ $age -gt $TMUTIL_CACHE_TTL ]]; then
+        debug "Cache expired (age: ${age}s > TTL: ${TMUTIL_CACHE_TTL}s)"
+        return 1
+    fi
+    
+    # Extract data
+    echo "$cache_content" | sed -n '/^DATA_START$/,/^DATA_END$/p' | sed '1d;$d'
+    return 0
+}
+
+# Clear cache
+clear_cache() {
+    rm -f "$TMUTIL_CACHE_FILE" "$TMUTIL_CACHE_LOCK"
+}
+
+# ============================================================================
+# TMUTIL FUNCTIONS
+# ============================================================================
+
 # Get raw tmutil status output
 get_tmutil_raw() {
     local output
@@ -48,15 +139,22 @@ get_tmutil_raw() {
     return 0
 }
 
-# Get tmutil status as JSON (with caching)
+# Get tmutil status as JSON (with shared caching)
 get_tmutil_json() {
-    local current_time=$(date +%s)
+    local force_refresh="${1:-false}"
     
-    # Check cache
-    if [[ -n "$TMUTIL_CACHE_DATA" ]] && (( current_time - TMUTIL_CACHE_TIME < TMUTIL_CACHE_TTL )); then
-        echo "$TMUTIL_CACHE_DATA"
-        return 0
+    # Try to read from shared cache first (unless forced refresh)
+    if [[ "$force_refresh" != "true" ]]; then
+        local cached_data
+        cached_data=$(read_cache)
+        if [[ -n "$cached_data" ]]; then
+            debug "Using cached tmutil data"
+            echo "$cached_data"
+            return 0
+        fi
     fi
+    
+    debug "Fetching fresh tmutil data"
     
     # Get fresh data
     local raw_output
@@ -71,18 +169,21 @@ get_tmutil_json() {
         return 1
     fi
     
-    # Update cache
-    TMUTIL_CACHE_TIME="$current_time"
-    TMUTIL_CACHE_DATA="$json_output"
+    # Write to shared cache
+    write_cache "$json_output"
     
     echo "$json_output"
     return 0
 }
 
-# Parse tmutil status into global variables (no eval needed)
+# Parse tmutil status into global variables with change detection
 parse_tmutil_status() {
     local json_data="${1:-}"
     local python_cmd="${TM_PYTHON_CMD:-python3}"
+    
+    # Store previous values for change detection
+    TM_LAST_BYTES="$TM_BYTES"
+    TM_LAST_UPDATE_TIME="$TM_LAST_UPDATE_TIME"
     
     # If no JSON provided, get it
     if [[ -z "$json_data" ]]; then
@@ -92,14 +193,19 @@ parse_tmutil_status() {
     # Parse with Python using a temp file to avoid quote issues
     local temp_script="/tmp/tmutil_parse_$$.py"
     cat > "$temp_script" << 'PYTHON_EOF'
-import json, sys
+import json, sys, time
 
 try:
     data = json.load(sys.stdin)
     
     # Extract all relevant fields (handle string conversions from plutil)
     running = int(data.get("Running", "0"))
-    phase = data.get("BackupPhase", "Unknown")
+    # If not running and no phase specified, set to "Not Running"
+    phase = data.get("BackupPhase", "")
+    if not phase and running == 0:
+        phase = "Not Running"
+    elif not phase:
+        phase = "Unknown"
     progress = data.get("Progress", {})
     
     # Progress dictionary fields (convert strings to numbers)
@@ -122,17 +228,20 @@ try:
     fraction_progress = float(data.get("FractionOfProgressBar", "0.0"))
     attempt_opts = int(data.get("attemptOptions", "0"))
     
+    # Add timestamp for tracking
+    update_time = int(time.time())
+    
     # Output tab-separated values for easy parsing
     output = "\t".join(str(x) for x in [
         running, phase, bytes_val, total_bytes, percent, files, total_files, 
         time_remaining, date_change, destination, destination_id, first_backup, 
         stopping, number_of_changed, fraction_progress, attempt_opts, 
-        raw_percent, raw_total_bytes
+        raw_percent, raw_total_bytes, update_time
     ])
     print(output)
     
 except Exception as e:
-    print("0\tError\t0\t0\t0\t0\t0\t0\t\t\t\t0\t0\t0\t0\t0\t0\t0", file=sys.stderr)
+    print("0\tError\t0\t0\t0\t0\t0\t0\t\t\t\t0\t0\t0\t0\t0\t0\t0\t0", file=sys.stderr)
     sys.exit(1)
 PYTHON_EOF
     
@@ -145,8 +254,11 @@ PYTHON_EOF
         return 1
     fi
     
-    # Parse tab-separated values into global variables
-    IFS=$'\t' read -r TM_RUNNING TM_PHASE TM_BYTES TM_TOTAL_BYTES TM_PERCENT TM_FILES TM_TOTAL_FILES TM_TIME_REMAINING TM_DATE_CHANGE TM_DESTINATION TM_DESTINATION_ID TM_FIRST_BACKUP TM_STOPPING TM_NUMBER_OF_CHANGED_ITEMS TM_FRACTION_OF_PROGRESS_BAR TM_ATTEMPT_OPTIONS TM_RAW_PERCENT TM_RAW_TOTAL_BYTES <<< "$parsed_output"
+    # Parse tab-separated values into global variables (including new timestamp)
+    IFS=$'\t' read -r TM_RUNNING TM_PHASE TM_BYTES TM_TOTAL_BYTES TM_PERCENT TM_FILES TM_TOTAL_FILES \
+        TM_TIME_REMAINING TM_DATE_CHANGE TM_DESTINATION TM_DESTINATION_ID TM_FIRST_BACKUP \
+        TM_STOPPING TM_NUMBER_OF_CHANGED_ITEMS TM_FRACTION_OF_PROGRESS_BAR TM_ATTEMPT_OPTIONS \
+        TM_RAW_PERCENT TM_RAW_TOTAL_BYTES TM_LAST_UPDATE_TIME <<< "$parsed_output"
     
     # Ensure numeric values are actually numeric
     TM_RUNNING="${TM_RUNNING:-0}"
@@ -163,8 +275,31 @@ PYTHON_EOF
     TM_ATTEMPT_OPTIONS="${TM_ATTEMPT_OPTIONS:-0}"
     TM_RAW_PERCENT="${TM_RAW_PERCENT:-0}"
     TM_RAW_TOTAL_BYTES="${TM_RAW_TOTAL_BYTES:-0}"
+    TM_LAST_UPDATE_TIME="${TM_LAST_UPDATE_TIME:-0}"
+    
+    # Detect if data has actually changed
+    if [[ "$TM_BYTES" != "$TM_LAST_BYTES" ]]; then
+        debug "Data changed: bytes $TM_LAST_BYTES -> $TM_BYTES"
+        return 0
+    fi
     
     return 0
+}
+
+# Force refresh of tmutil data
+force_tmutil_refresh() {
+    debug "Forcing tmutil cache refresh"
+    clear_cache
+    get_tmutil_json "true" >/dev/null 2>&1
+}
+
+# Check if data is stale
+is_tmutil_data_stale() {
+    local current_time=$(date +%s)
+    local age=$((current_time - TM_LAST_UPDATE_TIME))
+    
+    # Consider data stale if older than 2x the TTL
+    [[ $age -gt $((TMUTIL_CACHE_TTL * 2)) ]]
 }
 
 # Get simplified status for display (returns formatted string, no eval needed)
@@ -320,7 +455,9 @@ calculate_tm_speed() {
 
 # Format time remaining is now provided by formatting.sh
 # Keep this for backward compatibility only
-# The formatting.sh version (format_eta) is already aliased as format_time_remaining
+format_time_remaining() {
+    format_eta "$1"
+}
 
 # Get enhanced status with all available info
 get_tmutil_enhanced_status() {
@@ -358,6 +495,142 @@ Internal:
 EOF
 }
 
+# ============================================================================
+# TIME MACHINE CONTROL FUNCTIONS
+# ============================================================================
+
+# Track previous running state for completion detection
+TM_WAS_RUNNING=0
+
+# Start Time Machine backup
+# Returns: 0 on success, 1 on failure
+# Sets TM_START_RESULT with message
+start_time_machine_backup() {
+    debug "Attempting to start Time Machine backup"
+    
+    local result
+    result=$(tmutil startbackup 2>&1)
+    local exit_code=$?
+    
+    if [[ $exit_code -eq 0 ]]; then
+        if echo "$result" | grep -q "Backup is already running"; then
+            TM_START_RESULT="Backup already running"
+            debug "$TM_START_RESULT"
+            return 0
+        elif echo "$result" | grep -q "Starting standard backup"; then
+            TM_START_RESULT="Backup started successfully"
+            debug "$TM_START_RESULT"
+            return 0
+        else
+            TM_START_RESULT="Backup initiated"
+            debug "$TM_START_RESULT"
+            return 0
+        fi
+    else
+        # Parse common error conditions
+        if echo "$result" | grep -q "No destination configured"; then
+            TM_START_RESULT="No backup destination configured"
+        elif echo "$result" | grep -q "Backup destination not available"; then
+            TM_START_RESULT="Backup destination not available"
+        elif echo "$result" | grep -q "Backup not needed"; then
+            TM_START_RESULT="Backup not needed at this time"
+            debug "$TM_START_RESULT"
+            return 0  # This is not really an error
+        elif echo "$result" | grep -q "Time Machine is disabled"; then
+            TM_START_RESULT="Time Machine is disabled in System Preferences"
+        else
+            TM_START_RESULT="Failed to start backup: $result"
+        fi
+        
+        debug "$TM_START_RESULT"
+        return 1
+    fi
+}
+
+# Check if backup is needed
+# Returns: 0 if needed, 1 if not needed
+is_backup_needed() {
+    local result
+    result=$(tmutil startbackup --auto 2>&1)
+    
+    if echo "$result" | grep -q "Backup not needed"; then
+        return 1
+    fi
+    return 0
+}
+
+# Detect if backup just completed (transition from running to not running)
+# Returns: 0 if just completed, 1 otherwise
+detect_backup_completion() {
+    # Check current state
+    parse_tmutil_status >/dev/null 2>&1
+    
+    # If was running and now not running, backup completed
+    if [[ "$TM_WAS_RUNNING" == "1" ]] && [[ "$TM_RUNNING" == "0" ]]; then
+        debug "Backup completion detected (was running, now stopped)"
+        TM_WAS_RUNNING=0
+        return 0
+    fi
+    
+    # Update tracking variable
+    TM_WAS_RUNNING="$TM_RUNNING"
+    return 1
+}
+
+# Check if Time Machine is properly configured
+# Returns: 0 if configured, 1 if not
+is_tm_configured() {
+    local destinations
+    destinations=$(tmutil destinationinfo 2>/dev/null)
+    
+    if [[ -z "$destinations" ]] || echo "$destinations" | grep -q "No destinations configured"; then
+        return 1
+    fi
+    return 0
+}
+
+# Get Time Machine configuration status
+get_tm_config_status() {
+    if ! is_tm_configured; then
+        echo "No backup destination configured"
+        return 1
+    fi
+    
+    local dest_info
+    dest_info=$(tmutil destinationinfo 2>/dev/null | head -20)
+    
+    # Extract key info
+    local name mount_point
+    name=$(echo "$dest_info" | grep "Name" | head -1 | cut -d: -f2- | xargs)
+    mount_point=$(echo "$dest_info" | grep "Mount Point" | head -1 | cut -d: -f2- | xargs)
+    
+    if [[ -n "$mount_point" ]]; then
+        echo "Configured: $name at $mount_point"
+    else
+        echo "Configured but not mounted: $name"
+    fi
+    return 0
+}
+
+# Check if Time Machine is in a not-running state that needs handling
+# Returns: 0 if in problematic state, 1 if OK
+is_tm_in_error_state() {
+    parse_tmutil_status >/dev/null 2>&1
+    
+    # If running, not in error state
+    if [[ "$TM_RUNNING" == "1" ]]; then
+        return 1
+    fi
+    
+    # Check for the specific case: Running=0 with phase "Not Running" or empty phase
+    if [[ "$TM_RUNNING" == "0" ]] && [[ "$TM_PHASE" == "Not Running" || -z "$TM_PHASE" || "$TM_PHASE" == "Unknown" ]]; then
+        debug "Time Machine not running (Phase: ${TM_PHASE:-empty})"
+        return 0
+    fi
+    
+    return 1
+}
+
 # Get backup metadata for display (returns formatted text)
 get_tm_metadata() {
     local json_data="${1:-}"
@@ -375,11 +648,23 @@ get_tm_metadata() {
     [[ "$TM_FIRST_BACKUP" == "1" ]] && backup_type="Initial Backup"
     
     echo "Type: $backup_type"
-    echo "Started: ${TM_DATE_CHANGE:-Unknown}"
     
-    # Clean up destination path
-    local clean_dest="${TM_DESTINATION#/Volumes/}"
-    echo "Destination: ${clean_dest:-Unknown}"
+    # Show the date if available, otherwise show "In Progress"
+    if [[ -n "${TM_DATE_CHANGE}" && "${TM_DATE_CHANGE}" != "0" ]]; then
+        echo "Started: ${TM_DATE_CHANGE}"
+    else
+        echo "Started: In Progress"
+    fi
+    
+    # Clean up destination path - check if it's actually a path
+    if [[ "${TM_DESTINATION}" == /* ]]; then
+        local clean_dest="${TM_DESTINATION#/Volumes/}"
+        echo "Destination: ${clean_dest:-Unknown}"
+    elif [[ -n "${TM_DESTINATION}" && "${TM_DESTINATION}" != "0" ]]; then
+        echo "Destination: ${TM_DESTINATION}"
+    else
+        echo "Destination: Preparing..."
+    fi
     
     if [[ -n "$TM_DESTINATION_ID" ]]; then
         echo "Destination ID: ${TM_DESTINATION_ID:0:8}..."
@@ -394,7 +679,10 @@ get_tm_metadata() {
 export -f get_tmutil_raw get_tmutil_json parse_tmutil_status
 export -f get_tmutil_simple_status is_tm_running get_tm_phase
 export -f calculate_tm_speed get_tm_metadata get_tmutil_detailed
-export -f get_tmutil_enhanced_status
+export -f get_tmutil_enhanced_status force_tmutil_refresh is_tmutil_data_stale
+export -f clear_cache write_cache read_cache
+export -f start_time_machine_backup is_backup_needed detect_backup_completion
+export -f is_tm_configured get_tm_config_status is_tm_in_error_state
 
 # Export global variables for use in other scripts
 export TM_RUNNING TM_PHASE TM_BYTES TM_TOTAL_BYTES TM_PERCENT
@@ -402,3 +690,5 @@ export TM_FILES TM_TOTAL_FILES TM_TIME_REMAINING
 export TM_DATE_CHANGE TM_DESTINATION TM_DESTINATION_ID TM_FIRST_BACKUP
 export TM_STOPPING TM_NUMBER_OF_CHANGED_ITEMS TM_FRACTION_OF_PROGRESS_BAR
 export TM_ATTEMPT_OPTIONS TM_RAW_PERCENT TM_RAW_TOTAL_BYTES
+export TM_LAST_BYTES TM_LAST_UPDATE_TIME
+export TM_WAS_RUNNING TM_START_RESULT

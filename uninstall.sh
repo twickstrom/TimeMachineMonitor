@@ -112,7 +112,7 @@ remove_files() {
     local -a to_remove=()
     
     # Binaries
-    for bin in tm-monitor tm-monitor-resources; do
+    for bin in tm-monitor tm-monitor-resources tm-monitor-stats tm-dashboard; do
         for prefix in "$HOME/.local" "/usr/local" "/opt/tm-monitor"; do
             local file="$prefix/bin/$bin"
             [[ -f "$file" ]] && to_remove+=("$file")

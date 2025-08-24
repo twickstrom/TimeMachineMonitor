@@ -11,6 +11,14 @@ tm_monitor_init "${BASH_SOURCE[0]}" "standard"
 # Source argument parsing
 source "$TM_LIB_DIR/arguments.sh"
 
+# Source storage module if available
+if [[ -f "$TM_LIB_DIR/storage.sh" ]]; then
+    source "$TM_LIB_DIR/storage.sh"
+    STORAGE_AVAILABLE="true"
+else
+    STORAGE_AVAILABLE="false"
+fi
+
 # Usage information
 usage() {
     cat <<EOF
@@ -26,7 +34,18 @@ Options:
   -s, --no-summary         Don't show summary on exit
   -d, --debug              Enable debug logging
   -l, --csv-log            Enable CSV logging
+  --kill-all               Kill all running tm-monitor instances
+  --no-auto-start          Don't automatically start Time Machine if not running
   -C, --create-config      Create sample config file and exit
+
+Update Options:
+  --update                 Install available update
+  --update-check           Check for updates now
+  --update-enable          Enable automatic update checks
+  --update-disable         Disable automatic update checks
+  --update-snooze [DAYS]   Snooze update notifications (default: 7 days)
+  --update-frequency FREQ  Set check frequency (hourly/daily/weekly/monthly/never)
+  --update-settings        Show current update settings
   -v, --version            Show version and exit
   -h, --help               Show this help and exit
 
@@ -61,27 +80,145 @@ monitor_loop() {
     local consecutive_failures=0
     local json_data
     local first_iteration=true
+    local storage_session_started=false
+    local tm_started_by_us=false
+    local not_running_counter=0
+    local backup_completed=false
 
     while true; do
-        # Get tmutil status (using centralized function)
+        # Get tmutil status (using centralized function with shared cache)
         if json_data=$(get_tmutil_json); then
             consecutive_failures=0
 
-            # Show metadata on first iteration
+            # Parse status to check state
+            parse_tmutil_status "$json_data"
+            
+            # Check for backup completion
+            if detect_backup_completion; then
+                # Don't print completion message yet - just set a flag
+                backup_completed=true
+                export BACKUP_COMPLETED=1  # Export for cleanup handler
+                break
+            fi
+
+            # Handle first iteration
             if [[ "$first_iteration" == "true" ]]; then
+                # Always print metadata and header first
                 print_backup_metadata "$json_data"
                 echo
                 print_header
+                
+                # Check if TM is not running
+                if is_tm_in_error_state; then
+                    # Show the "Not Running" status in the table
+                    print_not_running_row
+                    print_footer
+                    export FOOTER_PRINTED=true
+                    
+                    # Try to start if auto-start is enabled
+                    if [[ "${TM_NO_AUTO_START:-false}" != "true" ]]; then
+                        echo
+                        echo "Attempting to start Time Machine backup..."
+                        
+                        if start_time_machine_backup; then
+                            if [[ "$TM_START_RESULT" != "Backup initiated" ]]; then
+                                echo "$TM_START_RESULT"
+                            fi
+                            
+                            # Give it a moment to start
+                            printf "Waiting for backup to initialize"
+                            for i in {1..3}; do
+                                printf "."
+                                sleep 1
+                            done
+                            echo
+                            
+                            # Refresh status and clear cache
+                            force_tmutil_refresh
+                            json_data=$(get_tmutil_json "true")  # Force refresh
+                            parse_tmutil_status "$json_data"
+                            
+                            # Check if backup actually started
+                            if [[ "$TM_RUNNING" == "1" ]]; then
+                                tm_started_by_us=true
+                                echo
+                                # Reprint metadata with updated info
+                                print_backup_metadata "$json_data"
+                                echo
+                                print_header
+                            else
+                                # Backup didn't start
+                                echo "Time Machine backup not started - exiting"
+                                exit 1
+                            fi
+                        else
+                            # Check if it's a real error or just "not needed"
+                            if echo "$TM_START_RESULT" | grep -q "not needed"; then
+                                echo "$TM_START_RESULT"
+                                echo "Continuing to monitor status..."
+                                echo
+                                print_header
+                            else
+                                echo
+                                print_error_and_exit "$TM_START_RESULT"
+                                exit 1
+                            fi
+                        fi
+                    else
+                        echo
+                        echo "Auto-start disabled - monitoring status only"
+                    fi
+                fi
+                
                 first_iteration=false
+                
+                # Start storage session if available
+                if [[ "$STORAGE_AVAILABLE" == "true" ]] && [[ "$STORAGE_ENABLED" == "true" ]]; then
+                    local backup_type="Incremental"
+                    [[ "${TM_FIRST_BACKUP:-0}" == "1" ]] && backup_type="Initial"
+                    start_storage_session "$backup_type" "${TM_DESTINATION:-Unknown}"
+                    storage_session_started=true
+                fi
             fi
 
             # Update state with new data
+            # Force cache refresh if we just started the backup
+            if [[ "$tm_started_by_us" == "true" ]] && [[ "$TM_RUNNING" == "1" ]]; then
+                # Clear cache to ensure fresh data for batch calculations
+                force_tmutil_refresh
+                json_data=$(get_tmutil_json "true")
+                parse_tmutil_status "$json_data"
+                tm_started_by_us=false  # Reset flag after first refresh
+            fi
             update_state "$json_data"
+            
+            # Record sample to storage if available
+            if [[ "$storage_session_started" == "true" ]]; then
+                record_tmutil_sample
+            fi
 
             # Check if backup is running and display appropriate row
             if is_backup_running; then
-                cache_dynamic_values
+                cache_dynamic_values >/dev/null 2>&1 || true
                 print_data_row
+                not_running_counter=0
+            elif is_tm_in_error_state; then
+                # Time Machine is not running
+                print_not_running_row
+                
+                # Show waiting message below table
+                print_footer
+                print_waiting_message "$INTERVAL"
+                
+                # Move cursor back up for next iteration
+                cursor_up 3
+                
+                ((not_running_counter++))
+                # Don't wait forever if TM won't start
+                if (( not_running_counter > 30 )); then
+                    info "Time Machine remains inactive after multiple checks"
+                    break
+                fi
             else
                 print_idle_row
             fi
@@ -90,26 +227,48 @@ monitor_loop() {
             debug "Failed to get tmutil status ($consecutive_failures/$MAX_FAILURES)"
 
             if (( consecutive_failures >= MAX_FAILURES )); then
-                print_idle_row
-                info "Time Machine is not running or unreachable"
+                # Try showing not running state
+                print_not_running_row
+                print_footer
+                info "Time Machine is not responding"
                 break
             fi
         fi
 
         sleep "$INTERVAL"
     done
+    
+    # Print footer to close the table properly
+    if [[ "${FOOTER_PRINTED:-false}" != "true" ]]; then
+        print_footer
+        export FOOTER_PRINTED=true
+    fi
+    
+    # Now show completion message if backup completed
+    if [[ "$backup_completed" == "true" ]]; then
+        print_backup_complete
+        # Mark session as completed if storage is enabled
+        if [[ "$storage_session_started" == "true" ]]; then
+            end_storage_session 1  # Pass 1 to indicate completion
+        fi
+    else
+        # End storage session normally (not completed)
+        if [[ "$storage_session_started" == "true" ]]; then
+            end_storage_session 0
+        fi
+    fi
 }
 
 # Setup helper process with initial backup detection
 setup_helper() {
     if [[ ! -x "$HELPER_SCRIPT" ]]; then
-        warn "Helper script not found at: $HELPER_SCRIPT"
-        warn "Using inline processing (slower)"
+        debug "Helper script not found at: $HELPER_SCRIPT"
+        debug "Using inline processing (slower)"
         return 1
     fi
 
     if [[ -z "${TM_PYTHON_CMD:-}" ]]; then
-        warn "Python 3 not found, using inline processing (slower)"
+        debug "Python 3 not found, using inline processing (slower)"
         return 1
     fi
 
@@ -156,9 +315,19 @@ main() {
     init_process_management
     init_session
     init_display
+    
+    # Initialize storage if available
+    if [[ "$STORAGE_AVAILABLE" == "true" ]]; then
+        init_storage
+    fi
 
     # Start helper process if available
     setup_helper
+
+    # Show update notification after a short delay (if available)
+    if [[ -n "$(type -t show_update_notification)" ]]; then
+        ( sleep 1 && show_update_notification ) &
+    fi
 
     # Run monitoring loop
     monitor_loop

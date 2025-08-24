@@ -1,0 +1,555 @@
+#!/usr/bin/env bash
+# bin/tm-monitor-stats - Display historical Time Machine statistics with terminal graphs
+# Requires: SQLite storage to be enabled
+
+set -uo pipefail
+
+# Initialize using core.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/core.sh"
+tm_monitor_init "${BASH_SOURCE[0]}" "minimal"
+
+# Source storage module
+source "$TM_LIB_DIR/storage.sh"
+
+# Check for SQLite
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    error "SQLite3 is required but not installed."
+    echo "Install it using: brew install sqlite3"
+    exit 1
+fi
+
+# Terminal graph configuration
+GRAPH_WIDTH=60
+GRAPH_HEIGHT=15
+GRAPH_CHARS=("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█")
+
+# Usage
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [command] [options]
+
+Display Time Machine backup statistics and historical data.
+
+Commands:
+  sessions [N]          Show last N sessions (default: 10)
+  graph [SESSION_ID]    Display speed graph for session (default: last session)
+  hourly [DAYS]         Show hourly statistics for last N days (default: 7)
+  summary               Show overall backup summary
+  current               Show current session statistics
+  watch [INTERVAL]      Watch current session (updates every INTERVAL seconds, default: 2)
+  export [SESSION_ID]   Export session data to CSV (default: last session)
+  cleanup               Clean up old data and optimize database
+
+Options:
+  -h, --help            Show this help message
+  -v, --version         Show version
+  -c, --no-colors       Disable colored output
+  -w, --watch           Watch mode (updates continuously)
+
+Examples:
+  $(basename "$0") sessions          # Show recent backup sessions
+  $(basename "$0") graph              # Graph last session speed
+  $(basename "$0") graph 42           # Graph session #42 speed  
+  $(basename "$0") hourly 30          # Show hourly stats for 30 days
+  $(basename "$0") watch              # Watch current session with updates
+  $(basename "$0") watch 5            # Watch with 5-second updates
+  $(basename "$0") export             # Export last session to CSV
+  $(basename "$0") export 42          # Export session #42 to CSV
+
+EOF
+    exit 0
+}
+
+# Draw terminal bar graph
+draw_bar_graph() {
+    local -a values=("$@")
+    local max_value=0
+    local min_value=999999999
+    
+    # Check terminal width
+    local term_width
+    term_width=$(tput cols 2>/dev/null || echo 80)
+    if (( term_width < 70 )); then
+        warn "Terminal too narrow for graph (need at least 70 columns, have $term_width)"
+        echo "Resize your terminal window or use: export COLUMNS=80"
+        return 1
+    fi
+    
+    # Find min/max
+    for val in "${values[@]}"; do
+        val=${val%.*}  # Remove decimals
+        [[ $val -gt $max_value ]] && max_value=$val
+        [[ $val -lt $min_value ]] && min_value=$val
+    done
+    
+    # Prevent division by zero
+    [[ $max_value -eq 0 ]] && max_value=1
+    local range=$((max_value - min_value))
+    [[ $range -eq 0 ]] && range=1
+    
+    # Draw graph
+    echo
+    echo -e "${COLOR_BOLD_BLUE}Transfer Speed Over Time${COLOR_RESET}"
+    echo "┌$(printf '─%.0s' {1..62})┐"
+    
+    # Draw bars from top to bottom with Y-axis label
+    for ((row = GRAPH_HEIGHT; row > 0; row--)); do
+        printf "│"
+        
+        # Y-axis value
+        local y_value=$((min_value + (range * row / GRAPH_HEIGHT)))
+        printf "%3d " "$y_value"
+        
+        # Draw row
+        for val in "${values[@]}"; do
+            val=${val%.*}
+            local bar_height=$(( (val - min_value) * GRAPH_HEIGHT / range ))
+            
+            if [[ $bar_height -ge $row ]]; then
+                # Select character based on how full this cell is
+                local char_idx=$(( (bar_height - row + 1) * 8 / GRAPH_HEIGHT ))
+                [[ $char_idx -gt 7 ]] && char_idx=7
+                [[ $char_idx -lt 0 ]] && char_idx=0
+                echo -en "${COLOR_GREEN}${GRAPH_CHARS[$char_idx]}${COLOR_RESET}"
+            else
+                printf " "
+            fi
+        done
+        
+        # Pad to width and add axis label
+        local data_width=${#values[@]}
+        local padding=$((GRAPH_WIDTH - data_width - 4))
+        [[ $padding -gt 0 ]] && printf "%*s" "$padding" ""
+        
+        # Add Y-axis label on middle rows
+        if [[ $row -eq $((GRAPH_HEIGHT / 2 + 1)) ]]; then
+            printf "│ MB/s"
+        elif [[ $row -eq $((GRAPH_HEIGHT / 2)) ]]; then
+            printf "│"
+        else
+            printf "│"
+        fi
+        echo
+    done
+    
+    # X-axis with clearer labels
+    echo "└────$(printf '─%.0s' {1..56})┘"
+    
+    # X-axis labels with better spacing
+    printf "     "  # Indent for Y-axis space
+    
+    local num_samples=${#values[@]}
+    if (( num_samples > 0 )); then
+        # Show start, middle, and end time markers
+        printf "0"
+        
+        if (( num_samples > 20 )); then
+            local mid=$((num_samples / 2))
+            local end=$((num_samples - 1))
+            printf "%*s" $((mid - 1)) "$(( mid * 2 ))s"
+            printf "%*s" $((end - mid)) "$(( end * 2 ))s"
+        else
+            printf "%*s" $((num_samples - 1)) "$(( num_samples * 2 ))s"
+        fi
+    fi
+    echo
+    
+    # X-axis label
+    printf "     %*s" $((GRAPH_WIDTH / 2 - 5)) "Time (seconds)"
+    echo
+    echo
+    
+    # Add legend/explanation
+    echo -e "${COLOR_DIM}Graph shows transfer speed (MB/s) over time during backup${COLOR_RESET}"
+    echo -e "${COLOR_DIM}Each bar represents a 2-second sample${COLOR_RESET}"
+    echo
+}
+
+# Show recent sessions
+show_sessions() {
+    local limit="${1:-10}"
+    
+    if [[ "$STORAGE_ENABLED" != "true" ]]; then
+        error "Storage is not enabled. Set TM_STORAGE_ENABLED=true"
+        exit 1
+    fi
+    
+    echo -e "${COLOR_BOLD_BLUE}Recent Backup Sessions${COLOR_RESET}"
+    echo
+    
+    get_recent_sessions "$limit"
+}
+
+# Show speed graph for session
+show_graph() {
+    local session_id="${1:-}"
+    
+    # If no session ID provided, get the last session
+    if [[ -z "$session_id" ]]; then
+        session_id=$(sqlite3 "$STORAGE_DB" "SELECT id FROM sessions ORDER BY start_time DESC LIMIT 1" 2>/dev/null)
+        if [[ -z "$session_id" ]]; then
+            error "No sessions found in database"
+            exit 1
+        fi
+        info "Using last session: #$session_id"
+    fi
+    
+    echo -e "${COLOR_BOLD_BLUE}Session #$session_id Speed Graph${COLOR_RESET}"
+    
+    # Get session info
+    get_session_stats "$session_id"
+    echo
+    
+    # Get speed data
+    local speed_data
+    speed_data=$(get_speed_history "$session_id" 60)
+    
+    if [[ -z "$speed_data" ]]; then
+        warn "No speed data available for session $session_id"
+        exit 1
+    fi
+    
+    # Parse CSV data into array
+    local -a speeds=()
+    while IFS=',' read -r seconds speed; do
+        [[ "$seconds" == "seconds" ]] && continue  # Skip header
+        speeds+=("$speed")
+    done <<< "$speed_data"
+    
+    # Draw graph
+    draw_bar_graph "${speeds[@]}"
+}
+
+# Show hourly statistics
+show_hourly() {
+    local days="${1:-7}"
+    
+    echo -e "${COLOR_BOLD_BLUE}Hourly Backup Statistics (Last $days Days)${COLOR_RESET}"
+    echo
+    
+    get_hourly_stats "$days"
+}
+
+# Show overall summary
+show_summary() {
+    echo -e "${COLOR_BOLD_BLUE}Time Machine Backup Summary${COLOR_RESET}"
+    echo
+    
+    # Get database info
+    local db_size
+    db_size=$(get_storage_size)
+    db_size=$((db_size / 1024 / 1024))  # Convert to MB
+    
+    echo "Database: $STORAGE_DB"
+    echo "Size: ${db_size} MB"
+    echo
+    
+    # Get statistics
+    sqlite3 -header -column "$STORAGE_DB" <<SQL
+SELECT 
+    COUNT(*) as total_sessions,
+    COUNT(CASE WHEN completed = 1 THEN 1 END) as completed,
+    COUNT(CASE WHEN completed = 0 THEN 1 END) as incomplete,
+    printf('%.2f GB', SUM(total_bytes) / 1000000000.0) as total_backed_up,
+    printf('%.2f MB/s', AVG(avg_speed_bytes) / 1000000.0) as avg_speed,
+    printf('%.2f MB/s', MAX(peak_speed_bytes) / 1000000.0) as max_speed,
+    datetime(MIN(start_time), 'unixepoch', 'localtime') as first_backup,
+    datetime(MAX(start_time), 'unixepoch', 'localtime') as last_backup
+FROM sessions;
+SQL
+    
+    echo
+    echo -e "${COLOR_BOLD_BLUE}Backup Types${COLOR_RESET}"
+    echo
+    
+    sqlite3 -header -column "$STORAGE_DB" <<SQL
+SELECT 
+    backup_type as type,
+    COUNT(*) as count,
+    printf('%.2f GB', AVG(total_bytes) / 1000000000.0) as avg_size,
+    printf('%.2f MB/s', AVG(avg_speed_bytes) / 1000000.0) as avg_speed
+FROM sessions
+GROUP BY backup_type;
+SQL
+}
+
+# Show current session statistics
+show_current() {
+    if [[ -z "${STORAGE_SESSION_ID:-}" ]]; then
+        warn "No current monitoring session"
+        
+        # Check if tm-monitor is running
+        if pgrep -f "tm-monitor" >/dev/null 2>&1; then
+            info "tm-monitor is running but no session data available"
+        else
+            info "tm-monitor is not currently running"
+        fi
+        exit 1
+    fi
+    
+    echo -e "${COLOR_BOLD_BLUE}Current Session Statistics${COLOR_RESET}"
+    echo
+    
+    get_session_stats "$STORAGE_SESSION_ID"
+    echo
+    
+    # Show recent samples
+    echo -e "${COLOR_BOLD_BLUE}Recent Samples${COLOR_RESET}"
+    echo
+    
+    sqlite3 -header -column "$STORAGE_DB" <<SQL
+SELECT 
+    datetime(timestamp, 'unixepoch', 'localtime') as time,
+    phase,
+    printf('%.2f GB', bytes_copied / 1000000000.0) as copied,
+    printf('%.2f%%', percent * 100) as progress,
+    printf('%.2f MB/s', speed_bytes / 1000000.0) as speed
+FROM samples
+WHERE session_id = $STORAGE_SESSION_ID
+ORDER BY timestamp DESC
+LIMIT 10;
+SQL
+}
+
+# Export session data
+export_session() {
+    local session_id="${1:-}"
+    
+    # If no session ID provided, get the last session
+    if [[ -z "$session_id" ]]; then
+        session_id=$(sqlite3 "$STORAGE_DB" "SELECT id FROM sessions ORDER BY start_time DESC LIMIT 1" 2>/dev/null)
+        if [[ -z "$session_id" ]]; then
+            error "No sessions found in database"
+            exit 1
+        fi
+        info "Using last session: #$session_id"
+    fi
+    
+    local filename="tm-monitor-session-${session_id}-$(date +%Y%m%d-%H%M%S).csv"
+    
+    echo "Exporting session $session_id to $filename..."
+    export_session_csv "$session_id" "$filename"
+    
+    if [[ -f "$filename" ]]; then
+        success "Exported to: $filename"
+        echo "File size: $(du -h "$filename" | cut -f1)"
+        echo "Line count: $(wc -l < "$filename")"
+    else
+        error "Export failed"
+        exit 1
+    fi
+}
+
+# Clean up old data
+cleanup_data() {
+    echo -e "${COLOR_BOLD_BLUE}Database Cleanup${COLOR_RESET}"
+    echo
+    
+    echo "Current database size: $(( $(get_storage_size) / 1024 / 1024 )) MB"
+    echo "Retention period: $STORAGE_RETENTION_DAYS days"
+    echo
+    
+    read -p "Clean up data older than $STORAGE_RETENTION_DAYS days? (y/N) " -n 1 -r
+    echo
+    
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        cleanup_old_data
+        optimize_storage
+        echo "New database size: $(( $(get_storage_size) / 1024 / 1024 )) MB"
+        success "Cleanup complete"
+    else
+        info "Cleanup cancelled"
+    fi
+}
+
+# Watch current session with continuous updates
+watch_current() {
+    local interval="${1:-2}"
+    
+    # Validate interval
+    if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 )); then
+        error "Invalid interval: $interval (must be positive integer)"
+        exit 1
+    fi
+    
+    # Check if monitoring is active
+    if ! pgrep -f "tm-monitor" >/dev/null 2>&1; then
+        warn "tm-monitor is not running. Start it first to see live data."
+        echo
+        echo "Usage: tm-monitor [options]"
+        exit 1
+    fi
+    
+    # Set up signal handler for clean exit
+    trap 'echo -e "\n${COLOR_GREEN}Stopped watching.${COLOR_RESET}"; exit 0' INT TERM
+    
+    echo -e "${COLOR_BOLD_BLUE}Watching Current Session${COLOR_RESET} (updates every ${interval}s, press Ctrl+C to stop)"
+    echo
+    
+    # Main watch loop
+    while true; do
+        # Clear screen and reset cursor
+        clear
+        echo -e "${COLOR_BOLD_BLUE}Time Machine Monitor - Live Statistics${COLOR_RESET}"
+        echo "Last Updated: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo
+        
+        # Get current session ID from running tm-monitor
+        local active_session
+        active_session=$(sqlite3 "$STORAGE_DB" "SELECT id FROM sessions WHERE end_time IS NULL ORDER BY start_time DESC LIMIT 1" 2>/dev/null)
+        
+        if [[ -n "$active_session" ]]; then
+            export STORAGE_SESSION_ID="$active_session"
+            
+            # Show session stats
+            echo -e "${COLOR_BOLD_GREEN}Session #$active_session${COLOR_RESET}"
+            echo
+            get_session_stats "$active_session"
+            echo
+            
+            # Show recent samples
+            echo -e "${COLOR_BOLD_BLUE}Recent Activity${COLOR_RESET}"
+            echo
+            
+            sqlite3 -header -column "$STORAGE_DB" <<SQL
+SELECT 
+    time(timestamp - (SELECT MIN(timestamp) FROM samples WHERE session_id = $active_session), 'unixepoch') as elapsed,
+    phase,
+    printf('%.2f%%', percent * 100) as progress,
+    printf('%.2f MB/s', speed_bytes / 1000000.0) as speed,
+    printf('%d', files_copied) as files
+FROM samples
+WHERE session_id = $active_session
+ORDER BY timestamp DESC
+LIMIT 10;
+SQL
+            
+            # Show mini speed graph if we have enough data
+            local sample_count
+            sample_count=$(sqlite3 "$STORAGE_DB" "SELECT COUNT(*) FROM samples WHERE session_id = $active_session AND speed_bytes > 0")
+            
+            if (( sample_count > 5 )); then
+                echo
+                echo -e "${COLOR_BOLD_BLUE}Speed Trend (last 30 samples)${COLOR_RESET}"
+                
+                # Get last 30 speed samples
+                local speeds
+                speeds=$(sqlite3 -list "$STORAGE_DB" <<SQL
+SELECT speed_bytes / 1000000.0
+FROM (
+    SELECT speed_bytes 
+    FROM samples 
+    WHERE session_id = $active_session AND speed_bytes > 0
+    ORDER BY timestamp DESC
+    LIMIT 30
+)
+ORDER BY timestamp;
+SQL
+                )
+                
+                # Create simple inline graph
+                if [[ -n "$speeds" ]]; then
+                    echo -n "  "
+                    while IFS= read -r speed; do
+                        # Convert speed to bar height (0-8)
+                        local height
+                        height=$(echo "scale=0; $speed / 10" | bc 2>/dev/null || echo "0")
+                        (( height > 7 )) && height=7
+                        (( height < 0 )) && height=0
+                        
+                        # Print bar character
+                        echo -en "${COLOR_GREEN}${GRAPH_CHARS[$height]}${COLOR_RESET}"
+                    done <<< "$speeds"
+                    echo
+                fi
+            fi
+            
+        else
+            warn "No active backup session found"
+            echo
+            info "Waiting for Time Machine backup to start..."
+        fi
+        
+        # Show footer
+        echo
+        echo "─────────────────────────────────────────────────────────────"
+        echo "Press Ctrl+C to stop watching | Interval: ${interval}s"
+        
+        # Wait for next update
+        sleep "$interval"
+    done
+}
+
+# Main
+main() {
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                ;;
+            -v|--version)
+                get_version_info
+                exit 0
+                ;;
+            -c|--no-colors)
+                export USE_COLORS="false"
+                init_colors "false"
+                shift
+                ;;
+            -w|--watch)
+                # Handle --watch as an alias for watch command
+                shift
+                set -- "watch" "$@"
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    
+    # Initialize storage
+    if ! init_storage; then
+        error "Failed to initialize storage"
+        exit 1
+    fi
+    
+    # Parse command
+    local command="${1:-summary}"
+    shift
+    
+    case "$command" in
+        sessions)
+            show_sessions "$@"
+            ;;
+        graph)
+            show_graph "$@"
+            ;;
+        hourly)
+            show_hourly "$@"
+            ;;
+        summary)
+            show_summary
+            ;;
+        current)
+            show_current
+            ;;
+        watch)
+            watch_current "$@"
+            ;;
+        export)
+            export_session "$@"
+            ;;
+        cleanup)
+            cleanup_data
+            ;;
+        *)
+            error "Unknown command: $command"
+            usage
+            ;;
+    esac
+}
+
+# Run main
+main "$@"

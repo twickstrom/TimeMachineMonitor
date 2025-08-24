@@ -55,6 +55,67 @@ parse_tm_monitor_args() {
                 export TM_CSV_LOG="true"
                 shift
                 ;;
+            --kill-all)
+                kill_all_tm_monitor
+                exit 0
+                ;;
+            --no-auto-start)
+                export TM_NO_AUTO_START="true"
+                shift
+                ;;
+            --update)
+                # Load update module if not already loaded
+                [[ -z "$(type -t install_update_interactive)" ]] && source "$TM_LIB_DIR/updates.sh"
+                install_update_interactive
+                exit $?
+                ;;
+            --update-check)
+                # Load update module if not already loaded
+                [[ -z "$(type -t force_update_check)" ]] && source "$TM_LIB_DIR/updates.sh"
+                force_update_check
+                exit 0
+                ;;
+            --update-disable)
+                # Load update module if not already loaded
+                [[ -z "$(type -t disable_update_checks)" ]] && source "$TM_LIB_DIR/updates.sh"
+                disable_update_checks
+                exit 0
+                ;;
+            --update-enable)
+                # Load update module if not already loaded
+                [[ -z "$(type -t enable_update_checks)" ]] && source "$TM_LIB_DIR/updates.sh"
+                enable_update_checks
+                exit 0
+                ;;
+            --update-snooze)
+                # Load update module if not already loaded
+                [[ -z "$(type -t snooze_updates)" ]] && source "$TM_LIB_DIR/updates.sh"
+                # Get the number of days (optional, default 7)
+                local days="7"
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    days="$2"
+                    shift
+                fi
+                snooze_updates "$days"
+                exit 0
+                ;;
+            --update-settings)
+                # Load update module if not already loaded
+                [[ -z "$(type -t show_update_settings)" ]] && source "$TM_LIB_DIR/updates.sh"
+                show_update_settings
+                exit 0
+                ;;
+            --update-frequency)
+                if [[ -z "${2:-}" ]]; then
+                    echo "Error: --update-frequency requires a value (hourly/daily/weekly/monthly/never)"
+                    exit 1
+                fi
+                # Load update module if not already loaded
+                [[ -z "$(type -t set_update_frequency)" ]] && source "$TM_LIB_DIR/updates.sh"
+                set_update_frequency "$2"
+                shift
+                exit 0
+                ;;
             -C|--create-config)
                 create_sample_config
                 exit 0

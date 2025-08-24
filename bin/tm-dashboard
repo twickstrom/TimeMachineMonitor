@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+# tm-dashboard - Launch tm-monitor and tm-monitor-resources in split screen layout
+# Creates a dashboard view with main monitor on left and resources on right
+
+set -uo pipefail
+
+# Get the directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source libraries
+if [[ -d "$SCRIPT_DIR/../lib" ]]; then
+    LIB_DIR="$SCRIPT_DIR/../lib"
+    source "$LIB_DIR/colors.sh"
+    source "$LIB_DIR/logger.sh"
+    source "$LIB_DIR/version.sh"
+    source "$LIB_DIR/terminal.sh"
+    source "$LIB_DIR/formatting.sh"
+    source "$LIB_DIR/process_management.sh"
+else
+    # Fallback if not found
+    error() { echo "ERROR: $*" >&2; }
+    info() { echo "INFO: $*" >&2; }
+    success() { echo "✓ $*" >&2; }
+    get_version() { echo "0.13.1"; }
+fi
+
+# Initialize colors
+init_colors "${SHOW_COLORS:-true}"
+
+# Usage
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [options]
+
+Launch Time Machine Monitor Dashboard with split-screen layout.
+
+This creates two terminal windows:
+  - Left:  tm-monitor (144 columns x full height)
+  - Right: tm-monitor-resources (65 columns x 36 rows)
+
+Options:
+  -h, --help       Show this help message
+  -v, --version    Show version
+  --no-resources   Only launch tm-monitor (no resource window)
+  --terminal APP   Terminal app to use (Terminal, iTerm2, auto)
+                   Default: auto-detect
+  --char-width N   Character width in pixels (default: 8)
+                   Adjust if windows are too wide/narrow for your font
+
+Terminal Support:
+  - Terminal.app (macOS default)
+  - iTerm2 (if installed)
+
+Examples:
+  $(basename "$0")                    # Auto-detect terminal
+  $(basename "$0") --terminal iTerm2  # Use iTerm2
+  $(basename "$0") --no-resources     # Monitor only
+  $(basename "$0") --char-width 7     # Smaller font
+  $(basename "$0") --char-width 10    # Larger font
+
+Troubleshooting:
+  If windows are too wide:  Use --char-width with a smaller number (e.g., 7)
+  If windows are too narrow: Use --char-width with a larger number (e.g., 10)
+  
+EOF
+    exit 0
+}
+
+# Detect which terminal application to use
+detect_terminal() {
+    # Check if iTerm2 is available and running
+    if osascript -e 'tell application "System Events" to name of processes' 2>/dev/null | grep -q "iTerm2"; then
+        echo "iTerm2"
+    elif [[ -d "/Applications/iTerm.app" ]]; then
+        echo "iTerm2"
+    else
+        echo "Terminal"
+    fi
+}
+
+# Get screen dimensions in POINTS (not pixels) for AppleScript
+get_screen_dimensions() {
+    # Method 1: Try to get logical resolution (points) using AppleScript
+    local logical_width logical_height
+    logical_width=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null | awk -F', ' '{print $3}')
+    logical_height=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null | awk -F', ' '{print $4}')
+    
+    if [[ -n "$logical_width" ]] && [[ -n "$logical_height" ]]; then
+        echo "$logical_width $logical_height"
+        return
+    fi
+    
+    # Method 2: Get physical resolution and detect if Retina
+    local screen_info
+    screen_info=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -E "Resolution|Retina" || echo "")
+    
+    if [[ -n "$screen_info" ]]; then
+        # Extract width and height from "Resolution: 2560 x 1440"
+        local width height
+        width=$(echo "$screen_info" | grep Resolution | head -1 | sed -E 's/.*Resolution: ([0-9]+) x .*/\1/')
+        height=$(echo "$screen_info" | grep Resolution | head -1 | sed -E 's/.*Resolution: [0-9]+ x ([0-9]+).*/\1/')
+        
+        # Check if it's a Retina display
+        if echo "$screen_info" | grep -q "Retina"; then
+            # Retina display - divide by 2 to get points
+            width=$((width / 2))
+            height=$((height / 2))
+        fi
+        
+        echo "$width $height"
+    else
+        # Default to common resolution in points
+        echo "1440 900"
+    fi
+}
+
+# Launch using Terminal.app
+launch_terminal_app() {
+    local monitor_only="$1"
+    local char_width="$2"
+    
+    info "Launching dashboard using Terminal.app..."
+    
+    # Get screen dimensions
+    local screen_dims
+    screen_dims=$(get_screen_dimensions)
+    IFS=' ' read -r screen_width screen_height <<< "$screen_dims"
+    
+    # Calculate window heights (subtract menu bar and dock space)
+    local available_height=$((screen_height - 100))
+    
+    # Calculate window widths based on columns needed
+    # Using provided character width or default
+    # Adjusted for actual column needs:
+    # tm-monitor needs 144 columns (141 + 3 more)
+    # tm-monitor-resources needs 65 columns (63 + 2 more)
+    
+    # Main monitor: 144 columns + scrollbar + window chrome
+    local monitor_width=$((144 * char_width + 30))
+    
+    # Resource monitor: 65 columns + scrollbar + window chrome  
+    local resource_width=$((64 * char_width + 30))
+    # Resource height: 36 rows (35 + 1 more)
+    local resource_height=$((36 * 16 + 50)) # ~626 pixels for 36 rows
+    
+    # Calculate positions - resource window aligned to right edge
+    # Now that we're using points, just a small margin for window chrome
+    local resource_x=$((screen_width - resource_width - 5))  # Right alignment with small margin
+    
+    info "Screen dimensions: ${screen_width} x ${screen_height} points"
+    info "Monitor window: ${monitor_width}pts wide (144 columns) at x=0"
+    info "Resource window: ${resource_width}pts wide (64 columns) at x=${resource_x}"
+    
+    # Launch tm-monitor in new window (left side)
+    osascript <<EOF
+tell application "Terminal"
+    -- Activate to bring to front
+    activate
+    
+    -- Create main monitor window
+    set monitorWindow to do script "cd '$SCRIPT_DIR' && ./tm-monitor"
+    
+    -- Position and size the window (left side)
+    tell window 1
+        set position to {0, 25}
+        set size to {$monitor_width, $available_height}
+    end tell
+    
+    -- Don't change font size - use user's default
+end tell
+EOF
+    
+    if [[ "$monitor_only" != "true" ]]; then
+        # Wait a moment for first window to settle
+        sleep 1
+        
+        # Launch tm-monitor-resources in second window (right side)
+        osascript <<EOF
+tell application "Terminal"
+    -- Activate to ensure windows are on top
+    activate
+    
+    -- Create resource monitor window
+    set resourceWindow to do script "cd '$SCRIPT_DIR' && ./tm-monitor-resources --watch"
+    
+    -- Get the ID of the new window (should be frontmost)
+    set resourceWindowID to id of front window
+    
+    -- Position and size the resource window (right side, properly aligned)
+    tell window id resourceWindowID
+        set position to {$resource_x, 25}
+        set size to {$resource_width, $resource_height}
+    end tell
+    
+    -- Don't change font size - use user's default
+    
+    -- Bring both windows to front with monitor window active
+    tell window 1
+        activate
+    end tell
+end tell
+EOF
+    fi
+    
+    success "Dashboard launched successfully!"
+    # Use formatted columns if available
+    if [[ "$(type -t format_column)" == "function" ]]; then
+        info "$(format_column 'Tip:' 5 left) Adjust window sizes if needed for your font settings"
+    else
+        info "Tip: Adjust window sizes if needed for your font settings"
+    fi
+}
+
+# Launch using iTerm2
+launch_iterm2() {
+    local monitor_only="$1"
+    local char_width="$2"
+    
+    info "Launching dashboard using iTerm2..."
+    
+    # Get screen dimensions
+    local screen_dims
+    screen_dims=$(get_screen_dimensions)
+    IFS=' ' read -r screen_width screen_height <<< "$screen_dims"
+    
+    # Calculate window dimensions
+    local available_height=$((screen_height - 100))
+    
+    # Calculate window widths based on columns needed
+    # Using provided character width
+    # Adjusted for actual column needs:
+    # tm-monitor needs 144 columns (141 + 3 more)
+    # tm-monitor-resources needs 65 columns (63 + 2 more)
+    
+    local monitor_width=$((144 * char_width + 30))   # for 144 columns
+    local resource_width=$((65 * char_width + 30))   # for 65 columns
+    local resource_height=$((36 * 16 + 50)) # for 36 rows (35 + 1 more)
+    
+    # Calculate positions - resource window aligned to right edge
+    local monitor_right=$monitor_width
+    # Now that we're using points, just a small margin for window chrome
+    local resource_x=$((screen_width - resource_width - 5))  # Right alignment with small margin
+    local resource_right=$((resource_x + resource_width))
+    local resource_bottom=$((25 + resource_height))
+    
+    info "Screen dimensions: ${screen_width} x ${screen_height} points"
+    info "Monitor window: ${monitor_width}pts wide (144 columns) at x=0"
+    info "Resource window: ${resource_width}pts wide (65 columns) at x=${resource_x}"
+    
+    osascript <<EOF
+tell application "iTerm2"
+    -- Activate to bring windows to front
+    activate
+    
+    -- Create new window for tm-monitor
+    set monitorWindow to create window with default profile
+    
+    tell monitorWindow
+        -- Set window bounds (left side)
+        set bounds to {0, 25, $monitor_right, $available_height}
+        
+        tell current session
+            write text "cd '$SCRIPT_DIR' && ./tm-monitor"
+        end tell
+    end tell
+    
+    $(if [[ "$monitor_only" != "true" ]]; then
+        echo "
+        -- Create second window for resources
+        set resourceWindow to create window with default profile
+        
+        tell resourceWindow
+            -- Set window bounds (right side, flush to edge)
+            set bounds to {$resource_x, 25, $resource_right, $resource_bottom}
+            
+            tell current session
+                write text \"cd '$SCRIPT_DIR' && ./tm-monitor-resources --watch\"
+            end tell
+        end tell
+        
+        -- Focus back on monitor window
+        select monitorWindow
+        "
+    fi)
+end tell
+EOF
+    
+    success "Dashboard launched successfully!"
+    # Use formatted columns if available
+    if [[ "$(type -t format_column)" == "function" ]]; then
+        info "$(format_column 'Tip:' 5 left) Adjust window sizes if needed for your font settings"
+    else
+        info "Tip: Adjust window sizes if needed for your font settings"
+    fi
+}
+
+# Kill any existing tm-monitor processes (but not ourselves!)
+cleanup_existing() {
+    local our_pid=$$
+    local pids
+    # Find tm-monitor processes, but exclude:
+    # - tm-dashboard (ourselves)
+    # - Any process with our PID
+    pids=$(ps aux | grep -E "[t]m-monitor" | grep -v "tm-dashboard" | awk '{print $2}' | grep -v "^${our_pid}$" || true)
+    
+    if [[ -n "$pids" ]]; then
+        info "Found existing tm-monitor processes, cleaning up..."
+        for pid in $pids; do
+            # Extra safety: don't kill ourselves
+            if [[ "$pid" != "$$" ]] && [[ "$pid" != "$PPID" ]]; then
+                kill "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+    fi
+}
+
+# Main
+main() {
+    local terminal_app="auto"
+    local monitor_only="false"
+    local char_width=8  # Default character width in pixels
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                ;;
+            -v|--version)
+                echo "tm-dashboard version $(get_version)"
+                exit 0
+                ;;
+            --no-resources)
+                monitor_only="true"
+                shift
+                ;;
+            --terminal)
+                if [[ $# -lt 2 ]]; then
+                    error "Missing value for --terminal"
+                    exit 1
+                fi
+                terminal_app="$2"
+                shift 2
+                ;;
+            --char-width)
+                if [[ $# -lt 2 ]]; then
+                    error "Missing value for --char-width"
+                    exit 1
+                fi
+                char_width="$2"
+                if ! [[ "$char_width" =~ ^[0-9]+$ ]] || (( char_width < 5 || char_width > 20 )); then
+                    error "Character width must be between 5 and 20 pixels"
+                    exit 1
+                fi
+                shift 2
+                ;;
+            *)
+                error "Unknown option: $1"
+                usage
+                ;;
+        esac
+    done
+    
+    # Check that tm-monitor exists
+    if [[ ! -x "$SCRIPT_DIR/tm-monitor" ]]; then
+        error "tm-monitor not found or not executable"
+        error "Make sure you're running from the tm-monitor bin directory"
+        exit 1
+    fi
+    
+    if [[ "$monitor_only" != "true" ]] && [[ ! -x "$SCRIPT_DIR/tm-monitor-resources" ]]; then
+        error "tm-monitor-resources not found or not executable"
+        info "Will launch monitor only"
+        monitor_only="true"
+    fi
+    
+    # Clean up any existing instances
+    cleanup_existing
+    
+    # Auto-detect terminal if needed
+    if [[ "$terminal_app" == "auto" ]]; then
+        terminal_app=$(detect_terminal)
+        info "Auto-detected terminal: $terminal_app"
+    fi
+    
+    # Use terminal.sh draw_horizontal_line if available, fallback to simple approach
+    if [[ "$(type -t draw_horizontal_line)" == "function" ]]; then
+        echo -e "${COLOR_BOLD_BLUE}$(draw_horizontal_line '═' 65)${COLOR_RESET}"
+        echo -e "${COLOR_BOLD_BLUE}$(center_text 'Time Machine Monitor Dashboard' 65)${COLOR_RESET}"
+        echo -e "${COLOR_BOLD_BLUE}$(draw_horizontal_line '═' 65)${COLOR_RESET}"
+    else
+        echo -e "${COLOR_BOLD_BLUE}═══════════════════════════════════════════════════════════════${COLOR_RESET}"
+        echo -e "${COLOR_BOLD_BLUE}     Time Machine Monitor Dashboard${COLOR_RESET}"
+        echo -e "${COLOR_BOLD_BLUE}═══════════════════════════════════════════════════════════════${COLOR_RESET}"
+    fi
+    echo
+    info "Using character width: ${char_width}px"
+    
+    # Launch based on terminal app
+    case "$terminal_app" in
+        iTerm2|iTerm|iterm2)
+            launch_iterm2 "$monitor_only" "$char_width"
+            ;;
+        Terminal|Terminal.app|terminal)
+            launch_terminal_app "$monitor_only" "$char_width"
+            ;;
+        *)
+            error "Unknown terminal application: $terminal_app"
+            error "Supported: Terminal, iTerm2"
+            exit 1
+            ;;
+    esac
+    
+    echo
+    echo -e "${COLOR_BOLD_GREEN}Dashboard Layout:${COLOR_RESET}"
+    echo "  • Left window:  Time Machine backup monitor (main)"
+    echo "  • Right window: Resource usage monitor (CPU/Memory)"
+    echo
+    echo -e "${COLOR_YELLOW}Tips:${COLOR_RESET}"
+    echo "  • Press Ctrl+C in either window to stop that monitor"
+    echo "  • Both windows update automatically"
+    echo "  • Resize windows as needed for your display"
+    echo
+}
+
+# Run main
+main "$@"
